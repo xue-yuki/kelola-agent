@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Environment variables (JANGAN PERNAH di-commit!)
+.env
+.env.local
+.env.production
+
+# WhatsApp session (data login, jangan di-commit)
+auth_info/
+auth_info_debug/
+
+# Debug files
+debug_connection.js
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
