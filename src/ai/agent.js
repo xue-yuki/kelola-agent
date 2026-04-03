@@ -113,7 +113,7 @@ PENTING: Jangan sebut harga yang berbeda dari daftar produk di atas!
       'X-Title': 'Kelola.ai Agent'
     },
     body: JSON.stringify({
-      model: 'qwen/qwen3.6-plus:free',
+      model: 'qwen/qwen-turbo',
       messages: [
         { role: 'system', content: systemPrompt },
         ...messages
