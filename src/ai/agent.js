@@ -108,10 +108,12 @@ PENTING: Jangan sebut harga yang berbeda dari daftar produk di atas!
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://kelola.ai',
+      'X-Title': 'Kelola.ai Agent'
     },
     body: JSON.stringify({
-      model: 'qwen/qwen3.6-plus-preview:free',
+      model: 'qwen/qwen3.6-plus:free',
       messages: [
         { role: 'system', content: systemPrompt },
         ...messages
@@ -120,13 +122,13 @@ PENTING: Jangan sebut harga yang berbeda dari daftar produk di atas!
   })
 
   const data = await response.json()
-  
+
   // Cek jika API return error
   if (!response.ok || !data.choices?.[0]?.message?.content) {
     console.error('❌ OpenRouter API error:', JSON.stringify(data))
     return 'Maaf, AI sedang tidak bisa dihubungi saat ini. Coba lagi sebentar ya! 🙏'
   }
-  
+
   const reply = data.choices[0].message.content
 
   // Save conversation
