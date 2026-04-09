@@ -78,23 +78,24 @@ export async function processMessage(waNumber, customerWa, customerMessage) {
   const history = await getConversationHistory(business.id, customerWa)
 
   const systemPrompt = `
-Kamu adalah asisten AI untuk ${business.business_name}.
-Jenis usaha: ${business.business_type}
+${business.ai_instructions ? 
+  business.ai_instructions 
+  : 
+  `Kamu adalah asisten AI untuk ${business.business_name}.
+Balas dengan ramah, bahasa Indonesia santai.
+Bantu customer tanya produk dan proses pesanan.`
+}
 
 PRODUK TERSEDIA:
-${products?.map(p => `- ${p.name}: Rp ${p.price.toLocaleString('id-ID')} (stok: ${p.stock})`).join('\n') || 'Belum ada produk'}
+${products?.map(p => 
+  `- ${p.name}: Rp ${p.price.toLocaleString('id-ID')} (stok: ${p.stock})`
+).join('\n') || 'Belum ada produk'}
 
-INSTRUKSI:
-1. Balas dengan ramah, natural, pakai bahasa Indonesia santai
-2. Gunakan emoji yang relevan
-3. Kalau customer mau order, konfirmasi dulu item & total
-4. Kalau stok habis, informasikan & tawarkan alternatif
-5. Kalau ada pertanyaan di luar bisnis, tolak sopan
-6. Setelah customer konfirmasi order, balas dengan format JSON di dalam tag <ORDER>:
-<ORDER>{"items":[{"name":"nama produk","qty":1,"price":15000}],"total":15000}</ORDER>
-
-PENTING: Jangan sebut harga yang berbeda dari daftar produk di atas!
-  `
+PENTING: 
+- Jangan sebut harga berbeda dari daftar di atas!
+- Setelah customer konfirmasi order, balas dengan format JSON di dalam tag <ORDER>:
+  <ORDER>{"items":[{"name":"nama produk","qty":1,"price":15000}],"total":15000}</ORDER>
+`
 
   const messages = [
     ...history.map(h => ({

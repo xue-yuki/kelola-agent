@@ -22,6 +22,33 @@ let isConnected = false
 let currentSock = null
 let isReconnecting = false  // cegah reconnect ganda
 
+export let currentQR = null;
+export let botStatus = 'disconnected';
+
+export async function logoutAndReconnect() {
+    if (currentSock) {
+        try {
+            await currentSock.logout();
+            // The 'close' event in connection.update will call cleanupAndRestart()
+        } catch (e) {
+            console.error('Error logging out:', e);
+            cleanupAndRestart();
+        }
+    } else {
+        cleanupAndRestart();
+    }
+}
+
+async function cleanupAndRestart() {
+    botStatus = 'disconnected';
+    currentQR = null;
+    const promisesFs = await import('fs/promises');
+    try {
+        await promisesFs.rm('auth_info', { recursive: true, force: true });
+    } catch {}
+    startBot(true);
+}
+
 // ─── Single Instance Lock ─────────────────────────────────────────────────────
 function acquireLock() {
   try {
@@ -93,13 +120,7 @@ export async function startBot(isRetry = false) {
 
   const { state, saveCreds } = await useMultiFileAuthState('auth_info')
 
-  if (!state.creds.registered && !savedPhoneNumber) {
-    const raw = await askQuestion(
-      '\n📱 Masukkan nomor WhatsApp kamu (format: 628xxxxxxxxxx tanpa +): '
-    )
-    savedPhoneNumber = raw.replace(/[^0-9]/g, '')
-    pairingRequested = false
-  }
+  // Dihapus askQuestion untuk QR connection dari dashboard
 
   const sock = makeWASocket({
     version,
@@ -122,27 +143,39 @@ export async function startBot(isRetry = false) {
   sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-    if (qr && savedPhoneNumber && !pairingRequested && !state.creds.registered) {
-      pairingRequested = true
-      try {
-        const code = await sock.requestPairingCode(savedPhoneNumber)
-        console.log(`\n🔑 Pairing Code: ${code}`)
-        console.log('   → WhatsApp > Setelan > Perangkat Tertaut > Tautkan Perangkat\n')
-      } catch (err) {
-        console.error('❌ Gagal pairing code:', err.message)
-        pairingRequested = false
+    if (qr) {
+      if (savedPhoneNumber && !pairingRequested && !state.creds.registered) {
+        pairingRequested = true
+        try {
+          const code = await sock.requestPairingCode(savedPhoneNumber)
+          console.log(`\n🔑 Pairing Code: ${code}`)
+          console.log('   → WhatsApp > Setelan > Perangkat Tertaut > Tautkan Perangkat\n')
+        } catch (err) {
+          console.error('❌ Gagal pairing code:', err.message)
+          pairingRequested = false
+        }
+      } else {
+        // Expose QR code untuk dashboard (base64 generation handled di server.js)
+        currentQR = qr;
+        botStatus = 'connecting';
       }
     }
 
     if (connection === 'connecting') {
       isConnected = false
+      botStatus = 'connecting';
+      currentQR = null;
       console.log('🔌 Menghubungkan ke WhatsApp...')
     } else if (connection === 'open') {
       isConnected = true
+      botStatus = 'connected';
+      currentQR = null;
       currentSock = sock
       console.log('\n✅ Kelola.ai Bot terhubung ke WhatsApp!')
     } else if (connection === 'close') {
       isConnected = false
+      botStatus = 'disconnected';
+      currentQR = null;
       const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut
 
@@ -154,9 +187,8 @@ export async function startBot(isRetry = false) {
         await delay(waitMs)
         startBot(true)  // isRetry = true
       } else {
-        console.log('\n🚫 Sesi logout. Hapus folder auth_info lalu jalankan ulang.')
-        releaseLock()
-        process.exit(0)
+        console.log('\n🚫 Sesi logout terdeteksi. Mereset ke mode QR...')
+        cleanupAndRestart()
       }
     }
   })
