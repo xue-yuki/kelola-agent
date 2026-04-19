@@ -42,15 +42,51 @@ async function saveConversation(businessId, customerWa, role, message) {
   })
 }
 
-async function saveOrder(businessId, customerWa, items, total) {
-  await supabase.from('orders').insert({
+async function saveOrder(businessId, customerWa, items, total, customerName, customerAddress) {
+  const { error: orderError } = await supabase.from('orders').insert({
     business_id: businessId,
-    customer_name: customerWa,
+    customer_name: customerName || customerWa,
+    customer_address: customerAddress || '',
     channel: 'whatsapp',
     total,
     status: 'menunggu',
     items
   })
+
+  if (orderError) console.error("Error inserting order:", orderError);
+
+  // Check if customer exists first
+  const { data: existingCustomer } = await supabase
+    .from('customers')
+    .select('id')
+    .eq('business_id', businessId)
+    .eq('wa_number', customerWa)
+    .single()
+
+  if (existingCustomer) {
+    // Update existing customer
+    const { error: updateError } = await supabase
+      .from('customers')
+      .update({
+        name: customerName || customerWa,
+        address: customerAddress || '',
+      })
+      .eq('id', existingCustomer.id)
+
+    if (updateError) console.error("Error updating customer:", updateError);
+  } else {
+    // Insert new customer
+    const { error: insertError } = await supabase
+      .from('customers')
+      .insert({
+        business_id: businessId,
+        wa_number: customerWa,
+        name: customerName || customerWa,
+        address: customerAddress || '',
+      })
+
+    if (insertError) console.error("Error inserting customer:", insertError);
+  }
 
   // Kurangi stok
   for (const item of items) {
@@ -78,23 +114,49 @@ export async function processMessage(waNumber, customerWa, customerMessage) {
   const history = await getConversationHistory(business.id, customerWa)
 
   const systemPrompt = `
-${business.ai_instructions ? 
-  business.ai_instructions 
-  : 
+${business.ai_instructions ?
+  business.ai_instructions
+  :
   `Kamu adalah asisten AI untuk ${business.business_name}.
 Balas dengan ramah, bahasa Indonesia santai.
 Bantu customer tanya produk dan proses pesanan.`
 }
 
 PRODUK TERSEDIA:
-${products?.map(p => 
+${products?.map(p =>
   `- ${p.name}: Rp ${p.price.toLocaleString('id-ID')} (stok: ${p.stock})`
 ).join('\n') || 'Belum ada produk'}
 
-PENTING: 
+ALUR WAJIB SEBELUM KONFIRMASI ORDER:
+1. Tanyakan produk apa yang mau dipesan dan berapa jumlahnya
+2. WAJIB tanyakan nama lengkap customer jika belum disebutkan
+3. WAJIB tanyakan alamat lengkap pengiriman (jalan, RT/RW, kelurahan, kecamatan, kota) jika belum disebutkan
+4. Konfirmasi ulang pesanan beserta total harga
+5. Baru setelah customer setuju, generate ORDER tag
+
+PENTING:
 - Jangan sebut harga berbeda dari daftar di atas!
-- Setelah customer konfirmasi order, balas dengan format JSON di dalam tag <ORDER>:
-  <ORDER>{"items":[{"name":"nama produk","qty":1,"price":15000}],"total":15000}</ORDER>
+- JANGAN PERNAH gunakan alamat palsu/contoh seperti "Jl. Sudirman" atau alamat placeholder!
+- Alamat HARUS dari customer langsung, jika belum ada TANYAKAN DULU!
+
+FORMAT KONFIRMASI PESANAN (setelah customer setuju):
+Tulis rincian pesanan dalam FORMAT TEKS BIASA yang bisa dibaca customer, contoh:
+---
+📦 *RINCIAN PESANAN*
+• Air RO 2 galon x Rp 5.500 = Rp 11.000
+• Gas 3KG 1 x Rp 24.000 = Rp 24.000
+*Total: Rp 35.000*
+
+Nama: Erlangga
+Alamat: Kodam Jaya Blok D1 No. 33
+
+Mas Adi langsung OTW ya kak! 🚚
+---
+
+LALU di AKHIR PESAN (SETELAH teks rincian), tambahkan tag ORDER untuk sistem:
+<ORDER>{"items":[{"name":"Air RO","qty":2,"price":5500},{"name":"Gas 3KG","qty":1,"price":24000}],"total":35000,"customer_name":"Erlangga","customer_address":"Kodam Jaya Blok D1 No. 33"}</ORDER>
+
+Tag ORDER HARUS di paling akhir pesan, JANGAN di tengah!
 `
 
   const messages = [
@@ -114,7 +176,7 @@ PENTING:
       'X-Title': 'Kelola.ai Agent'
     },
     body: JSON.stringify({
-      model: 'qwen/qwen-turbo',
+      model: 'google/gemini-2.0-flash-001',
       messages: [
         { role: 'system', content: systemPrompt },
         ...messages
@@ -132,6 +194,9 @@ PENTING:
 
   const reply = data.choices[0].message.content
 
+  // Debug: log raw AI response
+  console.log('🤖 Raw AI response:', reply.substring(0, 500))
+
   // Save conversation
   await saveConversation(business.id, customerWa, 'user', customerMessage)
   await saveConversation(business.id, customerWa, 'assistant', reply)
@@ -140,10 +205,14 @@ PENTING:
   const orderMatch = reply.match(/<ORDER>(.*?)<\/ORDER>/s)
   if (orderMatch) {
     try {
-      const order = JSON.parse(orderMatch[1])
-      await saveOrder(business.id, customerWa, order.items, order.total)
+      // Bersihkan indikator markdown backtick jika terbawa oleh respon AI
+      let rawJson = orderMatch[1].trim();
+      rawJson = rawJson.replace(/^```json\s*/, '').replace(/```$/, '').trim();
+      
+      const order = JSON.parse(rawJson)
+      await saveOrder(business.id, customerWa, order.items, order.total, order.customer_name, order.customer_address)
     } catch (e) {
-      console.error('Failed to parse order:', e)
+      console.error('Failed to parse order JSON block:', e)
     }
   }
 
