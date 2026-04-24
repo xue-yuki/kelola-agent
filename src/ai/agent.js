@@ -111,6 +111,17 @@ export async function processMessage(waNumber, customerWa, customerMessage) {
   if (!context) return 'Maaf, bisnis ini belum terdaftar di Kelola.ai.'
 
   const { business, products } = context
+
+  // Check Token Quota Limit
+  let limit = 1000; // Starter default
+  const tier = business.subscription_tier?.toLowerCase() || 'starter';
+  if (tier === 'pro') limit = -1;
+  else if (tier === 'basic') limit = 3000;
+
+  if (limit !== -1 && (business.token_usage || 0) >= limit) {
+      return '⛔ Maaf, layanan AI untuk toko ini sedang ditangguhkan karena telah mencapai batas kuota pesan bulanan. Mohon pesan melalui panggilan/chat manual ke pemilik toko ya!';
+  }
+
   const history = await getConversationHistory(business.id, customerWa)
 
   const systemPrompt = `
@@ -200,6 +211,19 @@ Tag ORDER HARUS di paling akhir pesan, JANGAN di tengah!
   // Save conversation
   await saveConversation(business.id, customerWa, 'user', customerMessage)
   await saveConversation(business.id, customerWa, 'assistant', reply)
+
+  // Increment token usage
+  try {
+    const currentUsage = business.token_usage || 0;
+    const { error: tokenErr } = await supabase.from('businesses')
+                                        .update({ token_usage: currentUsage + 1 })
+                                        .eq('id', business.id);
+    if (tokenErr) {
+        console.error("Supabase update error (token_usage):", tokenErr);
+    }
+  } catch (err) {
+    console.error("Gagal eksekusi update token usage:", err);
+  }
 
   // Detect & save order
   const orderMatch = reply.match(/<ORDER>(.*?)<\/ORDER>/s)
