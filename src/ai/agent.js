@@ -42,6 +42,38 @@ async function saveConversation(businessId, customerWa, role, message) {
   })
 }
 
+async function saveComplaint(businessId, customerWa, customerName, category, description) {
+  // Guard: skip if complaint from same customer already saved in the last 30 minutes
+  const since = new Date(Date.now() - 30 * 60 * 1000).toISOString()
+  const { data: existing } = await supabase
+    .from('complaints')
+    .select('id')
+    .eq('business_id', businessId)
+    .eq('customer_wa', customerWa)
+    .gte('created_at', since)
+    .limit(1)
+    .maybeSingle()
+
+  if (existing) {
+    console.log('⚠️ Complaint already saved recently, skipping duplicate.')
+    return
+  }
+
+  const { error } = await supabase.from('complaints').insert({
+    business_id: businessId,
+    customer_name: customerName || customerWa,
+    customer_wa: customerWa,
+    category: category || 'Lainnya',
+    description,
+    status: 'baru',
+    priority: 'normal',
+    source: 'whatsapp',
+  })
+
+  if (error) console.error('❌ Error saving complaint:', error)
+  else console.log(`🚨 Komplain disimpan dari ${customerWa}: ${category}`)
+}
+
 async function saveOrder(businessId, customerWa, items, total, customerName, customerAddress) {
   const { error: orderError } = await supabase.from('orders').insert({
     business_id: businessId,
@@ -168,6 +200,22 @@ LALU di AKHIR PESAN (SETELAH teks rincian), tambahkan tag ORDER untuk sistem:
 <ORDER>{"items":[{"name":"Air RO","qty":2,"price":5500},{"name":"Gas 3KG","qty":1,"price":24000}],"total":35000,"customer_name":"Erlangga","customer_address":"Kodam Jaya Blok D1 No. 33"}</ORDER>
 
 Tag ORDER HARUS di paling akhir pesan, JANGAN di tengah!
+
+DETEKSI KOMPLAIN:
+Jika customer menyampaikan keluhan/komplain (produk rusak, pesanan tidak sampai, salah item, dll), balas dengan empati seperti biasa, lalu tambahkan tag COMPLAINT di paling akhir pesan (HANYA di pesan pertama yang mendeteksi komplain, JANGAN ulangi di pesan-pesan berikutnya).
+
+Kategori yang tersedia (pilih SATU yang paling sesuai):
+- "Pesanan tidak sampai"
+- "Produk rusak / tidak sesuai"
+- "Salah item / kuantitas"
+- "Masalah pembayaran"
+- "Pelayanan kurang baik"
+- "Lainnya"
+
+Format tag COMPLAINT (di paling akhir pesan):
+<COMPLAINT>{"customer_name":"nama customer jika sudah diketahui, kosongkan jika belum","category":"kategori sesuai dari daftar di atas","description":"ringkasan keluhan singkat 1-2 kalimat"}</COMPLAINT>
+
+PENTING: Tag COMPLAINT hanya ditulis SEKALI di pesan pertama mendeteksi komplain. Pesan selanjutnya dalam percakapan komplain TIDAK perlu tag ini lagi.
 `
 
   const messages = [
@@ -240,6 +288,28 @@ Tag ORDER HARUS di paling akhir pesan, JANGAN di tengah!
     }
   }
 
-  // Return reply tanpa tag ORDER
-  return reply.replace(/<ORDER>.*?<\/ORDER>/s, '').trim()
+  // Detect & save complaint
+  const complaintMatch = reply.match(/<COMPLAINT>(.*?)<\/COMPLAINT>/s)
+  if (complaintMatch) {
+    try {
+      let rawJson = complaintMatch[1].trim()
+      rawJson = rawJson.replace(/^```json\s*/, '').replace(/```$/, '').trim()
+      const complaint = JSON.parse(rawJson)
+      await saveComplaint(
+        business.id,
+        customerWa,
+        complaint.customer_name || '',
+        complaint.category,
+        complaint.description
+      )
+    } catch (e) {
+      console.error('❌ Failed to parse complaint JSON:', e)
+    }
+  }
+
+  // Return reply tanpa tag ORDER dan COMPLAINT
+  return reply
+    .replace(/<ORDER>.*?<\/ORDER>/s, '')
+    .replace(/<COMPLAINT>.*?<\/COMPLAINT>/s, '')
+    .trim()
 }

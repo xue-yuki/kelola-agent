@@ -22,6 +22,9 @@ let isConnected = false
 let currentSock = null
 let isReconnecting = false  // cegah reconnect ganda
 
+// Map LID → phone number (e.g. '255868666908837' → '628513675376')
+export const lidToPhone = new Map()
+
 export let currentQR = null;
 export let botStatus = 'disconnected';
 
@@ -141,6 +144,19 @@ export async function startBot(isRetry = false) {
   isReconnecting = false
 
   sock.ev.on('creds.update', saveCreds)
+
+  // Build LID → phone number mapping from contact events
+  function indexContacts(contacts) {
+    for (const c of contacts) {
+      const lidJid      = c.lid      || (c.id?.endsWith('@lid')              ? c.id : null)
+      const phoneJid    = c.phoneNumber || (!c.id?.endsWith('@lid')          ? c.id : null)
+      if (lidJid && phoneJid) {
+        lidToPhone.set(lidJid.split('@')[0], phoneJid.split('@')[0])
+      }
+    }
+  }
+  sock.ev.on('contacts.upsert', indexContacts)
+  sock.ev.on('contacts.update', indexContacts)
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
     if (qr) {
