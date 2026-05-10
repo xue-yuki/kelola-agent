@@ -36,12 +36,26 @@ export async function handleMessage(sock, msg) {
     await sock.sendPresenceUpdate('composing', jid)
 
     // Process dengan AI
-    const reply = await processMessage(botWa, customerWa, text)
+    const { reply, receipt, ownerNotif } = await processMessage(botWa, customerWa, text)
 
-    // Kirim balasan
+    // Kirim balasan utama ke pelanggan
     await sock.sendMessage(jid, { text: reply }, { quoted: msg })
-    
     console.log(`✅ Balas ke ${customerWa}: ${reply.substring(0, 50)}...`)
+
+    // Kirim struk digital ke pelanggan jika ada order
+    if (receipt) {
+      await new Promise(r => setTimeout(r, 1500))
+      await sock.sendMessage(jid, { text: receipt })
+      console.log(`🧾 Struk dikirim ke ${customerWa}`)
+    }
+
+    // Kirim notifikasi ke owner (nomor bot sendiri)
+    if (ownerNotif) {
+      await new Promise(r => setTimeout(r, 1000))
+      const ownerJid = `${botWa}@s.whatsapp.net`
+      await sock.sendMessage(ownerJid, { text: ownerNotif })
+      console.log(`🔔 Notifikasi owner dikirim ke ${botWa}`)
+    }
   } catch (error) {
     const code = error?.output?.statusCode || error?.code
     console.error(`❌ Error handling message (${code}):`, error?.message || error)

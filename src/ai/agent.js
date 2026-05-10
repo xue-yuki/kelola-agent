@@ -74,8 +74,40 @@ async function saveComplaint(businessId, customerWa, customerName, category, des
   else console.log(`🚨 Komplain disimpan dari ${customerWa}: ${category}`)
 }
 
+function buildReceipt(businessName, orderId, items, total, customerName, customerAddress) {
+  const shortId = orderId ? orderId.slice(0, 8).toUpperCase() : '--------'
+  const now = new Date().toLocaleString('id-ID', {
+    day: 'numeric', month: 'long', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta'
+  })
+
+  const itemLines = items.map(item => {
+    const subtotal = (item.qty || 1) * (item.price || 0)
+    return `• ${item.name} ${item.qty}x  @Rp ${(item.price || 0).toLocaleString('id-ID')}  =  Rp ${subtotal.toLocaleString('id-ID')}`
+  }).join('\n')
+
+  return `━━━━━━━━━━━━━━━━━━━
+🧾 *STRUK PESANAN*
+━━━━━━━━━━━━━━━━━━━
+📋 No. Order: *#${shortId}*
+📅 ${now} WIB
+
+👤 *Nama:* ${customerName}
+📍 *Alamat:* ${customerAddress}
+
+📦 *Detail Pesanan:*
+${itemLines}
+
+━━━━━━━━━━━━━━━━━━━
+💰 *TOTAL: Rp ${total.toLocaleString('id-ID')}*
+━━━━━━━━━━━━━━━━━━━
+
+🙏 Terima kasih sudah order di *${businessName}*!
+Pesanan Kak ${customerName} segera kami proses! 🚀`
+}
+
 async function saveOrder(businessId, customerWa, items, total, customerName, customerAddress) {
-  const { error: orderError } = await supabase.from('orders').insert({
+  const { data: savedOrder, error: orderError } = await supabase.from('orders').insert({
     business_id: businessId,
     customer_name: customerName || customerWa,
     customer_address: customerAddress || '',
@@ -83,7 +115,7 @@ async function saveOrder(businessId, customerWa, items, total, customerName, cus
     total,
     status: 'menunggu',
     items
-  })
+  }).select('id').single()
 
   if (orderError) console.error("Error inserting order:", orderError);
 
@@ -136,11 +168,13 @@ async function saveOrder(businessId, customerWa, items, total, customerName, cus
         .eq('id', product.id)
     }
   }
+
+  return savedOrder?.id || null
 }
 
 export async function processMessage(waNumber, customerWa, customerMessage) {
   const context = await getBusinessContext(waNumber)
-  if (!context) return 'Maaf, bisnis ini belum terdaftar di Kelola.ai.'
+  if (!context) return { reply: 'Maaf, bisnis ini belum terdaftar di Kelola.ai.', receipt: null }
 
   const { business, products } = context
 
@@ -151,7 +185,7 @@ export async function processMessage(waNumber, customerWa, customerMessage) {
   else if (tier === 'basic') limit = 3000;
 
   if (limit !== -1 && (business.token_usage || 0) >= limit) {
-      return '⛔ Maaf, layanan AI untuk toko ini sedang ditangguhkan karena telah mencapai batas kuota pesan bulanan. Mohon pesan melalui panggilan/chat manual ke pemilik toko ya!';
+    return { reply: '⛔ Maaf, layanan AI untuk toko ini sedang ditangguhkan karena telah mencapai batas kuota pesan bulanan. Mohon pesan melalui panggilan/chat manual ke pemilik toko ya!', receipt: null }
   }
 
   const history = await getConversationHistory(business.id, customerWa)
@@ -248,7 +282,7 @@ PENTING: Tag COMPLAINT hanya ditulis SEKALI di pesan pertama mendeteksi komplain
   // Cek jika API return error
   if (!response.ok || !data.choices?.[0]?.message?.content) {
     console.error('❌ OpenRouter API error:', JSON.stringify(data))
-    return 'Maaf, AI sedang tidak bisa dihubungi saat ini. Coba lagi sebentar ya! 🙏'
+    return { reply: 'Maaf, AI sedang tidak bisa dihubungi saat ini. Coba lagi sebentar ya! 🙏', receipt: null }
   }
 
   const reply = data.choices[0].message.content
@@ -273,22 +307,32 @@ PENTING: Tag COMPLAINT hanya ditulis SEKALI di pesan pertama mendeteksi komplain
     console.error("Gagal eksekusi update token usage:", err);
   }
 
-  // Detect & save order
+  // Detect & save order, then build receipt + owner notif
+  let receipt = null
+  let ownerNotif = null
+
   const orderMatch = reply.match(/<ORDER>(.*?)<\/ORDER>/s)
   if (orderMatch) {
     try {
-      // Bersihkan indikator markdown backtick jika terbawa oleh respon AI
-      let rawJson = orderMatch[1].trim();
-      rawJson = rawJson.replace(/^```json\s*/, '').replace(/```$/, '').trim();
-      
+      let rawJson = orderMatch[1].trim()
+      rawJson = rawJson.replace(/^```json\s*/, '').replace(/```$/, '').trim()
       const order = JSON.parse(rawJson)
-      await saveOrder(business.id, customerWa, order.items, order.total, order.customer_name, order.customer_address)
+      const orderId = await saveOrder(business.id, customerWa, order.items, order.total, order.customer_name, order.customer_address)
+      receipt = buildReceipt(business.business_name, orderId, order.items, order.total, order.customer_name, order.customer_address)
+
+      const itemSummary = order.items.map(i => `• ${i.name} x${i.qty}`).join('\n')
+      ownerNotif = `🛒 *PESANAN BARU MASUK!*\n\n` +
+        `👤 *Pelanggan:* ${order.customer_name}\n` +
+        `📍 *Alamat:* ${order.customer_address}\n` +
+        `💰 *Total:* Rp ${order.total.toLocaleString('id-ID')}\n\n` +
+        `📦 *Item:*\n${itemSummary}\n\n` +
+        `_Cek dashboard untuk proses pesanan!_ 🚀`
     } catch (e) {
       console.error('Failed to parse order JSON block:', e)
     }
   }
 
-  // Detect & save complaint
+  // Detect & save complaint + owner notif
   const complaintMatch = reply.match(/<COMPLAINT>(.*?)<\/COMPLAINT>/s)
   if (complaintMatch) {
     try {
@@ -302,14 +346,22 @@ PENTING: Tag COMPLAINT hanya ditulis SEKALI di pesan pertama mendeteksi komplain
         complaint.category,
         complaint.description
       )
+
+      ownerNotif = `🚨 *KOMPLAIN BARU!*\n\n` +
+        `👤 *Pelanggan:* ${complaint.customer_name || customerWa}\n` +
+        `📱 *WA:* ${customerWa}\n` +
+        `🏷️ *Kategori:* ${complaint.category}\n` +
+        `📝 *Masalah:* ${complaint.description}\n\n` +
+        `_Segera tangani di dashboard komplain!_ ⚡`
     } catch (e) {
       console.error('❌ Failed to parse complaint JSON:', e)
     }
   }
 
-  // Return reply tanpa tag ORDER dan COMPLAINT
-  return reply
+  const cleanReply = reply
     .replace(/<ORDER>.*?<\/ORDER>/s, '')
     .replace(/<COMPLAINT>.*?<\/COMPLAINT>/s, '')
     .trim()
+
+  return { reply: cleanReply, receipt, ownerNotif }
 }
