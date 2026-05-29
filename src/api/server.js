@@ -2,6 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import qrcode from 'qrcode'
 import dotenv from 'dotenv'
+import rateLimit from 'express-rate-limit'
 import {
   getSession,
   getAllSessions,
@@ -14,6 +15,31 @@ dotenv.config()
 const app = express()
 app.use(cors())
 app.use(express.json())
+
+// ─── Rate Limiters ───────────────────────────────────────────────────────────
+// Helper buat limiter biar tidak repetitif
+function makeLimiter(max, windowMs = 60_000, message = 'Terlalu banyak request, coba lagi dalam 1 menit.') {
+  return rateLimit({
+    windowMs,
+    max,
+    standardHeaders: true,   // kirim header RateLimit-* ke client
+    legacyHeaders: false,
+    message: { error: message },
+    skip: (req) => {
+      // Skip rate limit kalau request datang dengan secret key yang benar
+      // (artinya dari server Next.js kita sendiri, bukan dari luar)
+      return req.headers['x-agent-secret'] === AGENT_SECRET_KEY
+    }
+  })
+}
+
+// Tiap endpoint punya limit berbeda sesuai sensitivitasnya
+const limitConnect   = makeLimiter(5,  60_000, 'Terlalu banyak percobaan koneksi. Coba lagi dalam 1 menit.')   // 5x/menit
+const limitDisconnect= makeLimiter(5,  60_000, 'Terlalu banyak percobaan disconnect. Coba lagi dalam 1 menit.') // 5x/menit
+const limitBroadcast = makeLimiter(3,  60_000, 'Terlalu banyak broadcast. Coba lagi dalam 1 menit.')            // 3x/menit
+const limitQR        = makeLimiter(30, 60_000, 'Terlalu banyak request QR. Coba lagi dalam 1 menit.')           // 30x/menit
+const limitStatus    = makeLimiter(60, 60_000, 'Terlalu banyak request status. Coba lagi dalam 1 menit.')       // 60x/menit
+const limitGlobal    = makeLimiter(100, 60_000, 'Terlalu banyak request. Coba lagi dalam 1 menit.')             // 100x/menit fallback
 
 // ─── Secret Key Middleware ────────────────────────────────────────────────────
 // Semua endpoint kecuali /api/health wajib menyertakan header:
@@ -41,7 +67,8 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true, uptime: process.uptime(), sessions: getAllSessions().length })
 })
 
-// ─── Terapkan middleware secret ke semua route di bawah ini ──────────────────
+// ─── Terapkan middleware secret + global rate limit ke semua route ──────────
+app.use(limitGlobal)
 app.use(requireSecret)
 
 // ─── List semua session aktif (untuk admin/debug) ─────────────────────────────
@@ -50,7 +77,7 @@ app.get('/api/sessions', (req, res) => {
 })
 
 // ─── Status koneksi WA per bisnis ────────────────────────────────────────────
-app.get('/api/status/:businessId', (req, res) => {
+app.get('/api/status/:businessId', limitStatus, (req, res) => {
   const { businessId } = req.params
   const session = getSession(businessId)
 
@@ -62,7 +89,7 @@ app.get('/api/status/:businessId', (req, res) => {
 })
 
 // ─── QR Code untuk scan ──────────────────────────────────────────────────────
-app.get('/api/qr/:businessId', async (req, res) => {
+app.get('/api/qr/:businessId', limitQR, async (req, res) => {
   const { businessId } = req.params
   const session = getSession(businessId)
 
@@ -83,7 +110,7 @@ app.get('/api/qr/:businessId', async (req, res) => {
 })
 
 // ─── Mulai / buat session baru ────────────────────────────────────────────────
-app.post('/api/connect/:businessId', async (req, res) => {
+app.post('/api/connect/:businessId', limitConnect, async (req, res) => {
   const { businessId } = req.params
 
   try {
@@ -95,7 +122,7 @@ app.post('/api/connect/:businessId', async (req, res) => {
 })
 
 // ─── Disconnect / logout session ─────────────────────────────────────────────
-app.post('/api/disconnect/:businessId', async (req, res) => {
+app.post('/api/disconnect/:businessId', limitDisconnect, async (req, res) => {
   const { businessId } = req.params
   const { clearAuth = true } = req.body
 
@@ -118,7 +145,7 @@ function getBroadcastState(businessId) {
   return broadcastStates.get(businessId)
 }
 
-app.post('/api/broadcast', async (req, res) => {
+app.post('/api/broadcast', limitBroadcast, async (req, res) => {
   const { businessId, recipients, template } = req.body
 
   // Validasi input
