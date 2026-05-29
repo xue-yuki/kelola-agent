@@ -6,9 +6,16 @@ node_modules/
 .env.local
 .env.production
 
-# WhatsApp session (data login, jangan di-commit)
+# WhatsApp session per bisnis (data login, jangan di-commit!)
+auth/
 auth_info/
 auth_info_debug/
+
+# PM2 logs
+logs/
+
+# Lock file lama (sudah tidak dipakai)
+bot.lock
 
 # Debug files
 debug_connection.js

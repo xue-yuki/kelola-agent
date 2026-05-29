@@ -1,6 +1,6 @@
-import { 
+import {
   makeWASocket,
-  useMultiFileAuthState, 
+  useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore
@@ -8,122 +8,26 @@ import {
 import { Boom } from '@hapi/boom'
 import pino from 'pino'
 import { handleMessage } from './handler.js'
-import readline from 'readline'
-import fs from 'fs'
-import path from 'path'
 
 const logger = pino({ level: 'silent' })
 
-const LOCK_FILE = path.resolve('bot.lock')
+// ─── LID → phone number mapping (per session) ────────────────────────────────
+// Map<businessId, Map<lid, phoneNumber>>
+const lidMaps = new Map()
 
-let savedPhoneNumber = null
-let pairingRequested = false
-let isConnected = false
-let currentSock = null
-let isReconnecting = false  // cegah reconnect ganda
-
-// Map LID → phone number (e.g. '255868666908837' → '628513675376')
-export const lidToPhone = new Map()
-
-export let currentQR = null;
-export let botStatus = 'disconnected';
-
-export async function logoutAndReconnect() {
-    if (currentSock) {
-        try {
-            await currentSock.logout();
-            // The 'close' event in connection.update will call cleanupAndRestart()
-        } catch (e) {
-            console.error('Error logging out:', e);
-            cleanupAndRestart();
-        }
-    } else {
-        cleanupAndRestart();
-    }
+export function getLidMap(businessId) {
+  if (!lidMaps.has(businessId)) lidMaps.set(businessId, new Map())
+  return lidMaps.get(businessId)
 }
 
-async function cleanupAndRestart() {
-    botStatus = 'disconnected';
-    currentQR = null;
-    const promisesFs = await import('fs/promises');
-    try {
-        await promisesFs.rm('auth_info', { recursive: true, force: true });
-    } catch {}
-    startBot(true);
-}
+// ─── Factory: buat WA session untuk satu bisnis ──────────────────────────────
+// sessionData adalah object dari agentManager yang akan di-mutate langsung
+export async function createBotSession(businessId, authDir, sessionData, isRetry = false) {
+  // Kalau session sudah di-destroy (misal user logout manual), stop reconnect
+  if (sessionData._destroyed) return
 
-// ─── Single Instance Lock ─────────────────────────────────────────────────────
-function acquireLock() {
-  try {
-    // Cek apakah lock sudah ada (dari proses lain)
-    if (fs.existsSync(LOCK_FILE)) {
-      const pid = fs.readFileSync(LOCK_FILE, 'utf8').trim()
-      // Cek apakah PID tersebut masih aktif
-      try {
-        process.kill(Number(pid), 0) // sinyal 0 = hanya cek, tidak kill
-        console.error(`❌ Bot sudah berjalan (PID: ${pid}). Hentikan proses itu dulu.`)
-        process.exit(1)
-      } catch {
-        // PID tidak aktif, lock lama — hapus dan lanjut
-        fs.unlinkSync(LOCK_FILE)
-      }
-    }
-    fs.writeFileSync(LOCK_FILE, String(process.pid))
-  } catch (err) {
-    console.error('❌ Gagal buat lock file:', err.message)
-  }
-}
-
-function releaseLock() {
-  try {
-    if (fs.existsSync(LOCK_FILE)) fs.unlinkSync(LOCK_FILE)
-  } catch {}
-}
-
-// Bersihkan lock saat proses berhenti
-process.on('exit', releaseLock)
-process.on('SIGINT', () => { releaseLock(); process.exit(0) })
-process.on('SIGTERM', () => { releaseLock(); process.exit(0) })
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-function askQuestion(query) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-  return new Promise(resolve => rl.question(query, ans => { rl.close(); resolve(ans) }))
-}
-
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms))
-}
-
-export function getActiveSock() {
-  return currentSock
-}
-
-export function isSocketConnected() {
-  return isConnected
-}
-
-// ─── Bot Core ─────────────────────────────────────────────────────────────────
-export async function startBot(isRetry = false) {
-  // Hanya acquire lock saat pertama kali start
-  if (!isRetry) acquireLock()
-
-  // Pastikan tidak ada reconnect ganda berjalan
-  if (isRetry && isReconnecting) return
-  if (isRetry) isReconnecting = true
-
-  // Tutup socket lama sebelum buat yang baru
-  if (currentSock) {
-    try { currentSock.end() } catch {}
-    currentSock = null
-  }
-
-  const { version, isLatest } = await fetchLatestBaileysVersion()
-  console.log(`📦 WA Web version: ${version.join('.')} (latest: ${isLatest})`)
-
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info')
-
-  // Dihapus askQuestion untuk QR connection dari dashboard
+  const { version } = await fetchLatestBaileysVersion()
+  const { state, saveCreds } = await useMultiFileAuthState(authDir)
 
   const sock = makeWASocket({
     version,
@@ -133,101 +37,103 @@ export async function startBot(isRetry = false) {
     },
     logger,
     printQRInTerminal: false,
-    // Tambahan: stabilkan koneksi
     connectTimeoutMs: 30000,
     keepAliveIntervalMs: 15000,
     retryRequestDelayMs: 2000,
   })
 
-  currentSock = sock
-  isConnected = false
-  isReconnecting = false
+  // Update socket di sessionData
+  sessionData.sock = sock
+  sessionData.status = 'connecting'
+  sessionData.qr = null
 
   sock.ev.on('creds.update', saveCreds)
 
-  // Build LID → phone number mapping from contact events
+  // ─── Build LID → phone number map ───────────────────────────────────────
+  const lidMap = getLidMap(businessId)
   function indexContacts(contacts) {
     for (const c of contacts) {
-      const lidJid      = c.lid      || (c.id?.endsWith('@lid')              ? c.id : null)
-      const phoneJid    = c.phoneNumber || (!c.id?.endsWith('@lid')          ? c.id : null)
+      const lidJid   = c.lid || (c.id?.endsWith('@lid') ? c.id : null)
+      const phoneJid = c.phoneNumber || (!c.id?.endsWith('@lid') ? c.id : null)
       if (lidJid && phoneJid) {
-        lidToPhone.set(lidJid.split('@')[0], phoneJid.split('@')[0])
+        lidMap.set(lidJid.split('@')[0], phoneJid.split('@')[0])
       }
     }
   }
   sock.ev.on('contacts.upsert', indexContacts)
   sock.ev.on('contacts.update', indexContacts)
 
+  // ─── Connection state handler ────────────────────────────────────────────
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    if (sessionData._destroyed) return
+
     if (qr) {
-      if (savedPhoneNumber && !pairingRequested && !state.creds.registered) {
-        pairingRequested = true
-        try {
-          const code = await sock.requestPairingCode(savedPhoneNumber)
-          console.log(`\n🔑 Pairing Code: ${code}`)
-          console.log('   → WhatsApp > Setelan > Perangkat Tertaut > Tautkan Perangkat\n')
-        } catch (err) {
-          console.error('❌ Gagal pairing code:', err.message)
-          pairingRequested = false
-        }
-      } else {
-        // Expose QR code untuk dashboard (base64 generation handled di server.js)
-        currentQR = qr;
-        botStatus = 'connecting';
-      }
+      sessionData.qr = qr
+      sessionData.status = 'connecting'
+      console.log(`📱 [${businessId}] QR code siap untuk di-scan.`)
     }
 
     if (connection === 'connecting') {
-      isConnected = false
-      botStatus = 'connecting';
-      currentQR = null;
-      console.log('🔌 Menghubungkan ke WhatsApp...')
+      sessionData.status = 'connecting'
+      sessionData.qr = null
+      console.log(`🔌 [${businessId}] Menghubungkan ke WhatsApp...`)
+
     } else if (connection === 'open') {
-      isConnected = true
-      botStatus = 'connected';
-      currentQR = null;
-      currentSock = sock
-      console.log('\n✅ Kelola.ai Bot terhubung ke WhatsApp!')
+      sessionData.status = 'connected'
+      sessionData.qr = null
+      sessionData.retryCount = 0
+      console.log(`✅ [${businessId}] Terhubung ke WhatsApp!`)
+
     } else if (connection === 'close') {
-      isConnected = false
-      botStatus = 'disconnected';
-      currentQR = null;
+      sessionData.status = 'disconnected'
+      sessionData.qr = null
+
       const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut
 
-      if (shouldReconnect) {
-        // Status 440 = ada session lain — tunggu lebih lama agar yang lain timeout
-        const waitMs = statusCode === 440 ? 20000 : 5000
-        console.log(`🔄 Reconnecting dalam ${waitMs/1000}s... (status: ${statusCode})`)
-        pairingRequested = false
-        await delay(waitMs)
-        startBot(true)  // isRetry = true
+      console.log(`🔴 [${businessId}] Koneksi terputus (status: ${statusCode})`)
+
+      if (shouldReconnect && !sessionData._destroyed) {
+        sessionData.retryCount = (sessionData.retryCount || 0) + 1
+
+        // Exponential backoff: max 60 detik
+        const baseWait = statusCode === 440 ? 20000 : 5000
+        const waitMs = Math.min(baseWait * Math.pow(1.5, sessionData.retryCount - 1), 60000)
+
+        console.log(`🔄 [${businessId}] Reconnect #${sessionData.retryCount} dalam ${Math.round(waitMs / 1000)}s...`)
+        await new Promise(r => setTimeout(r, waitMs))
+
+        if (!sessionData._destroyed) {
+          createBotSession(businessId, authDir, sessionData, true)
+        }
       } else {
-        console.log('\n🚫 Sesi logout terdeteksi. Mereset ke mode QR...')
-        cleanupAndRestart()
+        console.log(`🚫 [${businessId}] Sesi logout. Bersihkan auth...`)
+        // Bersihkan session tanpa hapus folder (biar bisa scan QR lagi)
+        sessionData.sock = null
+        sessionData.status = 'disconnected'
       }
     }
   })
 
+  // ─── Incoming message handler ────────────────────────────────────────────
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return
-    
+    if (sessionData._destroyed) return
+
     const msg = messages[0]
     if (!msg?.message || msg.key.fromMe) return
 
-    // Abaikan pesan jika koneksi sedang tidak stabil
-    if (!isConnected || !currentSock) {
-      console.log('⚠️ Pesan diterima saat koneksi tidak stabil, skip.')
+    if (sessionData.status !== 'connected' || !sessionData.sock) {
+      console.log(`⚠️ [${businessId}] Pesan diterima saat koneksi tidak stabil, skip.`)
       return
     }
 
-    // Snapshot sock saat ini agar tidak berubah di tengah proses async
-    const activeSock = currentSock
+    const activeSock = sessionData.sock
 
     try {
-      await handleMessage(activeSock, msg)
+      await handleMessage(activeSock, msg, businessId, lidMap)
     } catch (err) {
-      console.error('❌ Unhandled error in handleMessage:', err?.message || err)
+      console.error(`❌ [${businessId}] Unhandled error in handleMessage:`, err?.message || err)
     }
   })
 }
