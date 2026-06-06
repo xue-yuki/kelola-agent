@@ -270,6 +270,7 @@ PENTING: Tag COMPLAINT hanya ditulis SEKALI di pesan pertama mendeteksi komplain
     },
     body: JSON.stringify({
       model: process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash-lite',
+      max_tokens: parseInt(process.env.AI_MAX_TOKENS || '500'),
       messages: [
         { role: 'system', content: systemPrompt },
         ...messages
