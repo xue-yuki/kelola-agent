@@ -97,14 +97,14 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
         sessionData.retryCount = (sessionData.retryCount || 0) + 1
 
         // Exponential backoff: max 60 detik
-        const baseWait = statusCode === 440 ? 20000 : 5000
+        const baseWait = statusCode === 440 ? 3000 : 5000
         const waitMs = Math.min(baseWait * Math.pow(1.5, sessionData.retryCount - 1), 60000)
 
         console.log(`🔄 [${businessId}] Reconnect #${sessionData.retryCount} dalam ${Math.round(waitMs / 1000)}s...`)
         await new Promise(r => setTimeout(r, waitMs))
 
         if (!sessionData._destroyed) {
-          createBotSession(businessId, authDir, sessionData, true)
+          await createBotSession(businessId, authDir, sessionData, true)
         }
       } else {
         console.log(`🚫 [${businessId}] Sesi logout. Bersihkan auth...`)
