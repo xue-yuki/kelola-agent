@@ -250,6 +250,11 @@ Format tag COMPLAINT (di paling akhir pesan):
 <COMPLAINT>{"customer_name":"nama customer jika sudah diketahui, kosongkan jika belum","category":"kategori sesuai dari daftar di atas","description":"ringkasan keluhan singkat 1-2 kalimat"}</COMPLAINT>
 
 PENTING: Tag COMPLAINT hanya ditulis SEKALI di pesan pertama mendeteksi komplain. Pesan selanjutnya dalam percakapan komplain TIDAK perlu tag ini lagi.
+
+DETEKSI MINTA CHAT DENGAN PEMILIK / MANUSIA ASLI:
+Jika customer bilang ingin bicara dengan admin/pemilik/manusia asli, atau ada hal di luar wewenang AI:
+Tambahkan tag <CALL_OWNER> di akhir pesan.
+Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya. Ditunggu sebentar! 🙏 <CALL_OWNER>"
 `
 
   const messages = [
@@ -260,16 +265,14 @@ PENTING: Tag COMPLAINT hanya ditulis SEKALI di pesan pertama mendeteksi komplain
     { role: 'user', content: customerMessage }
   ]
 
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://kelola.ai',
-      'X-Title': 'Kelola.ai Agent'
+      'Authorization': `Bearer ${process.env.GEMINI_API_KEY}`,
+      'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      model: process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash-lite',
+      model: process.env.GEMINI_MODEL || 'gemini-flash-latest',
       max_tokens: parseInt(process.env.AI_MAX_TOKENS || '500'),
       messages: [
         { role: 'system', content: systemPrompt },
@@ -282,7 +285,7 @@ PENTING: Tag COMPLAINT hanya ditulis SEKALI di pesan pertama mendeteksi komplain
 
   // Cek jika API return error
   if (!response.ok || !data.choices?.[0]?.message?.content) {
-    console.error('❌ OpenRouter API error:', JSON.stringify(data))
+    console.error('❌ Gemini API error:', JSON.stringify(data))
     return { reply: 'Maaf, AI sedang tidak bisa dihubungi saat ini. Coba lagi sebentar ya! 🙏', receipt: null }
   }
 
@@ -359,9 +362,18 @@ PENTING: Tag COMPLAINT hanya ditulis SEKALI di pesan pertama mendeteksi komplain
     }
   }
 
+  // Detect chat owner request
+  if (reply.includes('<CALL_OWNER>')) {
+    ownerNotif = `📞 *PANGGILAN ADMIN!*\n\n` +
+      `👤 *Pelanggan:* ${customerWa}\n` +
+      `💬 *Pesan Terakhir:* "${customerMessage}"\n\n` +
+      `_Pelanggan ini ingin berbicara langsung dengan manusia/pemilik toko. Silakan balas manual dari HP kamu!_`
+  }
+
   const cleanReply = reply
     .replace(/<ORDER>.*?<\/ORDER>/s, '')
     .replace(/<COMPLAINT>.*?<\/COMPLAINT>/s, '')
+    .replace(/<CALL_OWNER>/g, '')
     .trim()
 
   return { reply: cleanReply, receipt, ownerNotif }

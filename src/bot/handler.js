@@ -26,6 +26,12 @@ export async function handleMessage(sock, msg, businessId, lidMap) {
 
   if (!text) return
 
+  // Filter 1: JANGAN balas pesan dari Grup atau Broadcast Status
+  if (jid.endsWith('@g.us') || jid.endsWith('@broadcast')) {
+    console.log(`⏭️ [${businessId}] Mengabaikan pesan dari grup/status: ${jid}`)
+    return
+  }
+
   console.log(`📩 [${businessId}] Pesan dari ${customerWa}: ${text}`)
 
   try {
