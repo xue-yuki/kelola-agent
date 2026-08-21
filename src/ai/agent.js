@@ -1,5 +1,6 @@
 import dotenv from 'dotenv'
 import supabase from '../db/supabase.js'
+import { generateQrisForOrder, scheduleAutoConfirm } from '../payment/qris.js'
 
 dotenv.config()
 
@@ -106,7 +107,7 @@ ${itemLines}
 Pesanan Kak ${customerName} segera kami proses! 🚀`
 }
 
-async function saveOrder(businessId, customerWa, items, total, customerName, customerAddress) {
+async function saveOrder(businessId, customerWa, items, total, customerName, customerAddress, paymentMethod) {
   const { data: savedOrder, error: orderError } = await supabase.from('orders').insert({
     business_id: businessId,
     customer_name: customerName || customerWa,
@@ -114,7 +115,8 @@ async function saveOrder(businessId, customerWa, items, total, customerName, cus
     channel: 'whatsapp',
     total,
     status: 'menunggu',
-    items
+    items,
+    payment_method: paymentMethod || null
   }).select('id').single()
 
   if (orderError) console.error("Error inserting order:", orderError);
@@ -209,15 +211,20 @@ ALUR WAJIB SEBELUM KONFIRMASI ORDER:
 2. WAJIB tanyakan nama lengkap customer jika belum disebutkan
 3. WAJIB tanyakan alamat lengkap pengiriman (jalan, RT/RW, kelurahan, kecamatan, kota) jika belum disebutkan
 4. Konfirmasi ulang pesanan beserta total harga
-5. Baru setelah customer setuju, generate ORDER tag
+5. WAJIB tanya metode pembayaran (kecuali customer sudah menyebut sendiri):
+   - Tanyakan secara santai/casual (free-form, bukan kaku), contoh: "Bayarnya mau pake QRIS langsung dari sini atau COD tunai pas barang sampai kak?"
+   - Jika customer bingung / ambigu / bilang "gimana enak" / "terserah" → push halus ke QRIS: "Aku bikinin QRIS aja ya kak, biar praktis 😁"
+   - Jika customer dari awal sudah menyebut "qris" atau "cod" (atau sinonimnya seperti "cash", "tunai", "transfer", "scan"), LANGSUNG skip pertanyaan ini — jangan tanya ulang, biar customer nggak repot
+6. Setelah metode bayar jelas, BARU generate ORDER tag
 
 PENTING:
 - Jangan sebut harga berbeda dari daftar di atas!
 - JANGAN PERNAH gunakan alamat palsu/contoh seperti "Jl. Sudirman" atau alamat placeholder!
 - Alamat HARUS dari customer langsung, jika belum ada TANYAKAN DULU!
+- Metode pembayaran WAJIB salah satu dari: "qris" atau "cod"
 
-FORMAT KONFIRMASI PESANAN (setelah customer setuju):
-Tulis rincian pesanan dalam FORMAT TEKS BIASA yang bisa dibaca customer, contoh:
+FORMAT KONFIRMASI PESANAN (setelah metode bayar jelas):
+Tulis rincian pesanan dalam FORMAT TEKS BIASA yang bisa dibaca customer, contoh untuk QRIS:
 ---
 📦 *RINCIAN PESANAN*
 • Air RO 2 galon x Rp 5.500 = Rp 11.000
@@ -226,12 +233,28 @@ Tulis rincian pesanan dalam FORMAT TEKS BIASA yang bisa dibaca customer, contoh:
 
 Nama: Erlangga
 Alamat: Kodam Jaya Blok D1 No. 33
+Bayar: QRIS
 
-Mas Adi langsung OTW ya kak! 🚚
+Bentar ya kak, aku bikinin QRIS-nya... 💳
+---
+
+Atau contoh untuk COD:
+---
+📦 *RINCIAN PESANAN*
+• Air RO 2 galon x Rp 5.500 = Rp 11.000
+*Total: Rp 11.000*
+
+Nama: Erlangga
+Alamat: Kodam Jaya Blok D1 No. 33
+Bayar: COD (tunai)
+
+Siapin Rp 11.000 tunai ya kak buat Mas Adi. Langsung OTW! 🚚
 ---
 
 LALU di AKHIR PESAN (SETELAH teks rincian), tambahkan tag ORDER untuk sistem:
-<ORDER>{"items":[{"name":"Air RO","qty":2,"price":5500},{"name":"Gas 3KG","qty":1,"price":24000}],"total":35000,"customer_name":"Erlangga","customer_address":"Kodam Jaya Blok D1 No. 33"}</ORDER>
+<ORDER>{"items":[{"name":"Air RO","qty":2,"price":5500},{"name":"Gas 3KG","qty":1,"price":24000}],"total":35000,"customer_name":"Erlangga","customer_address":"Kodam Jaya Blok D1 No. 33","payment_method":"qris"}</ORDER>
+
+Field payment_method WAJIB diisi, nilainya HARUS "qris" atau "cod" (huruf kecil).
 
 Tag ORDER HARUS di paling akhir pesan, JANGAN di tengah!
 
@@ -265,15 +288,15 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
     { role: 'user', content: customerMessage }
   ]
 
-  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
+  const response = await fetch(process.env.AI_PAAS_URL || 'https://ai.paas.id/v1/chat/completions', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${process.env.GEMINI_API_KEY}`,
+      'Authorization': `Bearer ${process.env.AI_PAAS_API_KEY}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      model: process.env.GEMINI_MODEL || 'gemini-flash-latest',
-      max_tokens: parseInt(process.env.AI_MAX_TOKENS || '500'),
+      model: process.env.AI_PAAS_MODEL || 'claude-haiku-4-5',
+      max_tokens: parseInt(process.env.AI_MAX_TOKENS || '2000'),
       messages: [
         { role: 'system', content: systemPrompt },
         ...messages
@@ -285,7 +308,7 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
 
   // Cek jika API return error
   if (!response.ok || !data.choices?.[0]?.message?.content) {
-    console.error('❌ Gemini API error:', JSON.stringify(data))
+    console.error('❌ AI-PaaS API error:', JSON.stringify(data))
     return { reply: 'Maaf, AI sedang tidak bisa dihubungi saat ini. Coba lagi sebentar ya! 🙏', receipt: null }
   }
 
@@ -321,16 +344,71 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
       let rawJson = orderMatch[1].trim()
       rawJson = rawJson.replace(/^```json\s*/, '').replace(/```$/, '').trim()
       const order = JSON.parse(rawJson)
-      const orderId = await saveOrder(business.id, customerWa, order.items, order.total, order.customer_name, order.customer_address)
+
+      // Normalize payment method (default: qris untuk backward-compat)
+      const paymentMethod = (order.payment_method || 'qris').toLowerCase() === 'cod' ? 'cod' : 'qris'
+
+      const orderId = await saveOrder(business.id, customerWa, order.items, order.total, order.customer_name, order.customer_address, paymentMethod)
       receipt = buildReceipt(business.business_name, orderId, order.items, order.total, order.customer_name, order.customer_address)
 
       const itemSummary = order.items.map(i => `• ${i.name} x${i.qty}`).join('\n')
+      const paymentLabel = paymentMethod === 'qris' ? '💳 QRIS' : '💵 COD (tunai)'
       ownerNotif = `🛒 *PESANAN BARU MASUK!*\n\n` +
         `👤 *Pelanggan:* ${order.customer_name}\n` +
         `📍 *Alamat:* ${order.customer_address}\n` +
-        `💰 *Total:* Rp ${order.total.toLocaleString('id-ID')}\n\n` +
+        `💰 *Total:* Rp ${order.total.toLocaleString('id-ID')}\n` +
+        `💳 *Bayar:* ${paymentLabel}\n\n` +
         `📦 *Item:*\n${itemSummary}\n\n` +
         `_Cek dashboard untuk proses pesanan!_ 🚀`
+
+      const cleanReply = reply
+        .replace(/<ORDER>.*?<\/ORDER>/s, '')
+        .replace(/<COMPLAINT>.*?<\/COMPLAINT>/s, '')
+        .replace(/<CALL_OWNER>/g, '')
+        .trim()
+
+      // ─── Branch berdasarkan metode pembayaran ────────────────────────
+      if (paymentMethod === 'qris') {
+        // QRIS path: generate QR, HOLD struk (dikirim setelah bayar via callback)
+        let qris = null
+        try {
+          if (orderId) {
+            qris = await generateQrisForOrder({
+              orderId,
+              businessId: business.id,
+              businessName: business.business_name,
+              total: order.total
+            })
+            scheduleAutoConfirm({ orderId, businessId: business.id })
+          }
+        } catch (qrisErr) {
+          console.error('❌ Gagal generate QRIS:', qrisErr)
+        }
+
+        return {
+          reply: cleanReply,
+          receipt: null,       // struk di-HOLD, dikirim di callback lunas
+          ownerNotif,
+          paymentMethod: 'qris',
+          qris: qris ? {
+            orderId,
+            buffer: qris.qrisBuffer,
+            expiresAt: qris.expiresAt,
+            total: order.total,
+            customerName: order.customer_name,
+            receipt        // pass struk ke handler biar dikirim pas lunas
+          } : null
+        }
+      } else {
+        // COD path: struk dikirim langsung, no QRIS
+        return {
+          reply: cleanReply,
+          receipt,           // kirim struk langsung
+          ownerNotif,
+          paymentMethod: 'cod',
+          qris: null
+        }
+      }
     } catch (e) {
       console.error('Failed to parse order JSON block:', e)
     }
