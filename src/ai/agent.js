@@ -288,14 +288,15 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
     { role: 'user', content: customerMessage }
   ]
 
-  const response = await fetch(process.env.AI_PAAS_URL || 'https://ai.paas.id/v1/chat/completions', {
+  const response = await fetch(process.env.AI_PAAS_URL || 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${process.env.AI_PAAS_API_KEY}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      model: process.env.AI_PAAS_MODEL || 'claude-haiku-4-5',
+      model: process.env.AI_PAAS_MODEL || 'gemini-3.5-flash-lite',
+      reasoning_effort: 'minimal',
       max_tokens: parseInt(process.env.AI_MAX_TOKENS || '2000'),
       messages: [
         { role: 'system', content: systemPrompt },
