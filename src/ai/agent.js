@@ -256,14 +256,27 @@ export async function processMessage(waNumber, customerWa, customerMessage) {
 
   const { business, products } = context
 
-  // Check Token Quota Limit
-  let limit = 1000; // Starter default
-  const tier = business.subscription_tier?.toLowerCase() || 'starter';
-  if (tier === 'pro') limit = -1;
-  else if (tier === 'basic') limit = 3000;
-
-  if (limit !== -1 && (business.token_usage || 0) >= limit) {
-    return { reply: '⛔ Maaf, layanan AI untuk toko ini sedang ditangguhkan karena telah mencapai batas kuota pesan bulanan. Mohon pesan melalui panggilan/chat manual ke pemilik toko ya!', receipt: null }
+  // Kuota chat bulanan dari paket langganan (cek + tambah atomik di database).
+  // Gagal cek (DB error) => lolos (fail-open) supaya bot tidak mati karena gangguan DB.
+  let quotaPrefix = ''
+  try {
+    const { data: usage, error: quotaErr } = await supabase.rpc('consume_wa_chat', { p_business_id: business.id })
+    const row = Array.isArray(usage) ? usage[0] : usage
+    if (quotaErr || !row) {
+      console.error('⚠️ Gagal cek kuota chat, lanjut tanpa pembatasan:', quotaErr?.message)
+    } else if (!row.allowed) {
+      console.warn(`⛔ [${business.id}] Kuota chat bulanan habis (${row.used}/${row.quota})`)
+      return { reply: '⛔ Maaf, layanan AI untuk toko ini sedang dijeda karena kuota pesan bulanan sudah habis. Mohon hubungi pemilik toko langsung ya, Kak 🙏', receipt: null }
+    } else if (row.quota > 0) {
+      const warnAt = Math.ceil(row.quota * 0.8)
+      if (row.used === warnAt) {
+        quotaPrefix = `⚠️ *Kuota chat AI hampir habis:* ${row.used}/${row.quota} bulan ini. Upgrade paket supaya bot tetap membalas pelanggan.\n\n`
+      } else if (row.used === row.quota) {
+        quotaPrefix = `⛔ *Kuota chat AI bulan ini habis* (${row.used}/${row.quota}). Pesan berikutnya tidak akan dibalas AI sampai kuota direset atau paket di-upgrade.\n\n`
+      }
+    }
+  } catch (quotaException) {
+    console.error('⚠️ Error saat cek kuota chat, lanjut:', quotaException?.message)
   }
 
   const history = await getConversationHistory(business.id, customerWa)
@@ -414,7 +427,7 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
 
   // Detect & save order, then build receipt + owner notif
   let receipt = null
-  let ownerNotif = null
+  let ownerNotif = quotaPrefix ? quotaPrefix.trim() : null
 
   const orderMatch = reply.match(/<ORDER>(.*?)<\/ORDER>/s)
   if (orderMatch) {
@@ -426,7 +439,7 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
       const checked = await validateOrder(business.id, parsed)
       if (!checked.ok) {
         console.warn(`🚫 [${business.id}] Order ditolak validasi (${checked.reason}) dari ${customerWa}`)
-        return { reply: checked.message, receipt: null, ownerNotif: null }
+        return { reply: checked.message, receipt: null, ownerNotif: quotaPrefix ? quotaPrefix.trim() : null }
       }
       const order = {
         items: checked.items,
@@ -444,7 +457,7 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
 
       const itemSummary = order.items.map(i => `• ${i.name} x${i.qty}`).join('\n')
       const paymentLabel = paymentMethod === 'qris' ? '💳 QRIS' : '💵 COD (tunai)'
-      ownerNotif = `🛒 *PESANAN BARU MASUK!*\n\n` +
+      ownerNotif = quotaPrefix + `🛒 *PESANAN BARU MASUK!*\n\n` +
         `👤 *Pelanggan:* ${order.customer_name}\n` +
         `📍 *Alamat:* ${order.customer_address}\n` +
         `💰 *Total:* Rp ${order.total.toLocaleString('id-ID')}\n` +
@@ -523,7 +536,7 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
         complaint.description
       )
 
-      ownerNotif = `🚨 *KOMPLAIN BARU!*\n\n` +
+      ownerNotif = quotaPrefix + `🚨 *KOMPLAIN BARU!*\n\n` +
         `👤 *Pelanggan:* ${complaint.customer_name || customerWa}\n` +
         `📱 *WA:* ${customerWa}\n` +
         `🏷️ *Kategori:* ${complaint.category}\n` +
@@ -536,7 +549,7 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
 
   // Detect chat owner request
   if (reply.includes('<CALL_OWNER>')) {
-    ownerNotif = `📞 *PANGGILAN ADMIN!*\n\n` +
+    ownerNotif = quotaPrefix + `📞 *PANGGILAN ADMIN!*\n\n` +
       `👤 *Pelanggan:* ${customerWa}\n` +
       `💬 *Pesan Terakhir:* "${customerMessage}"\n\n` +
       `_Pelanggan ini ingin berbicara langsung dengan manusia/pemilik toko. Silakan balas manual dari HP kamu!_`

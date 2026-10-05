@@ -1,5 +1,6 @@
 import { processMessage } from '../ai/agent.js'
 import { onOrderPaid } from '../payment/qris.js'
+import { checkIncoming } from '../lib/rateLimiter.js'
 
 export async function handleMessage(sock, msg, businessId, lidMap) {
   const jid = msg.key.remoteJid
@@ -34,6 +35,22 @@ export async function handleMessage(sock, msg, businessId, lidMap) {
   }
 
   console.log(`📩 [${businessId}] Pesan dari ${customerWa}: ${text}`)
+
+  // Rate limit per menit (per pelanggan & per bisnis) — sebelum menyentuh AI / database
+  const rl = checkIncoming(businessId, customerWa)
+  if (!rl.ok) {
+    console.warn(`🚦 [${businessId}] Rate limit (${rl.scope}) untuk ${customerWa}`)
+    if (rl.notify) {
+      try {
+        await sock.sendMessage(jid, {
+          text: rl.scope === 'customer'
+            ? 'Pesannya terlalu cepat nih Kak 🙏 Mohon tunggu sebentar ya, nanti kami balas satu per satu.'
+            : 'Saat ini pesan yang masuk sedang banyak, Kak 🙏 Mohon tunggu sebentar lalu kirim lagi ya.'
+        })
+      } catch (e) { console.error('Gagal kirim notifikasi rate limit:', e?.message) }
+    }
+    return
+  }
 
   try {
     // Typing indicator
