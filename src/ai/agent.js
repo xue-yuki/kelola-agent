@@ -297,6 +297,7 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
     body: JSON.stringify({
       model: process.env.AI_PAAS_MODEL || 'gemini-3.5-flash-lite',
       reasoning_effort: 'minimal',
+      stream: false,
       max_tokens: parseInt(process.env.AI_MAX_TOKENS || '2000'),
       messages: [
         { role: 'system', content: systemPrompt },
