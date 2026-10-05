@@ -107,6 +107,82 @@ ${itemLines}
 Pesanan Kak ${customerName} segera kami proses! 🚀`
 }
 
+const MAX_QTY_PER_ITEM = 100
+const MAX_ITEMS_PER_ORDER = 20
+
+// Bersihkan teks dari pelanggan/AI sebelum disimpan atau dikirim ke owner (anti format/prompt injection)
+function cleanText(value, maxLen) {
+  return String(value ?? '')
+    .replace(/[\u0000-\u001F\u007F]+/g, ' ')
+    .replace(/[*_~`]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLen)
+}
+
+function normName(value) {
+  return String(value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+// Harga, nama produk, dan total TIDAK dipercaya dari output AI:
+// semuanya dihitung ulang dari tabel products milik bisnis ini.
+async function validateOrder(businessId, order) {
+  const reject = (reason, message) => ({ ok: false, reason, message })
+  const askAgain = 'Maaf Kak, pesanannya belum bisa kami proses karena ada item yang tidak ada di katalog atau stoknya tidak cukup. Boleh sebutkan lagi pesanannya ya? 🙏'
+
+  if (!order || !Array.isArray(order.items) || order.items.length === 0 || order.items.length > MAX_ITEMS_PER_ORDER) {
+    return reject('items kosong/tidak valid', askAgain)
+  }
+
+  const { data: catalog, error } = await supabase
+    .from('products')
+    .select('id, name, price, stock')
+    .eq('business_id', businessId)
+  if (error || !catalog) return reject('gagal baca katalog', askAgain)
+
+  const items = []
+  for (const raw of order.items) {
+    const wanted = normName(raw?.name)
+    const qty = Number(raw?.qty)
+    if (!wanted || !Number.isInteger(qty) || qty < 1 || qty > MAX_QTY_PER_ITEM) {
+      return reject(`item/qty tidak valid: ${JSON.stringify(raw)?.slice(0, 80)}`, askAgain)
+    }
+
+    let matches = catalog.filter(p => normName(p.name) === wanted)
+    if (matches.length === 0) {
+      matches = catalog.filter(p => normName(p.name).includes(wanted) || wanted.includes(normName(p.name)))
+    }
+    if (matches.length !== 1) return reject(`produk tidak ditemukan/ambigu: ${wanted}`, askAgain)
+
+    const product = matches[0]
+    if (!Number.isFinite(Number(product.price)) || Number(product.price) < 0) {
+      return reject(`harga produk tidak valid: ${product.name}`, askAgain)
+    }
+    if ((product.stock ?? 0) < qty) return reject(`stok tidak cukup: ${product.name}`, askAgain)
+
+    const existing = items.find(i => i.product_id === product.id)
+    if (existing) {
+      existing.qty += qty
+      existing.subtotal = existing.qty * existing.price
+    } else {
+      items.push({ product_id: product.id, name: product.name, qty, price: Number(product.price), subtotal: qty * Number(product.price) })
+    }
+  }
+
+  const total = items.reduce((sum, i) => sum + i.subtotal, 0)
+  if (Number(order.total) !== total) {
+    console.warn(`⚠️ Total dari AI (${order.total}) beda dengan hitungan server (${total}). Pakai hitungan server.`)
+  }
+
+  return {
+    ok: true,
+    items,
+    total,
+    customerName: cleanText(order.customer_name, 80),
+    customerAddress: cleanText(order.customer_address, 250),
+  }
+}
+
 async function saveOrder(businessId, customerWa, items, total, customerName, customerAddress, paymentMethod) {
   const { data: savedOrder, error: orderError } = await supabase.from('orders').insert({
     business_id: businessId,
@@ -345,7 +421,20 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
     try {
       let rawJson = orderMatch[1].trim()
       rawJson = rawJson.replace(/^```json\s*/, '').replace(/```$/, '').trim()
-      const order = JSON.parse(rawJson)
+      const parsed = JSON.parse(rawJson)
+
+      const checked = await validateOrder(business.id, parsed)
+      if (!checked.ok) {
+        console.warn(`🚫 [${business.id}] Order ditolak validasi (${checked.reason}) dari ${customerWa}`)
+        return { reply: checked.message, receipt: null, ownerNotif: null }
+      }
+      const order = {
+        items: checked.items,
+        total: checked.total,
+        customer_name: checked.customerName || customerWa,
+        customer_address: checked.customerAddress,
+        payment_method: parsed.payment_method,
+      }
 
       // Normalize payment method (default: qris untuk backward-compat)
       const paymentMethod = (order.payment_method || 'qris').toLowerCase() === 'cod' ? 'cod' : 'qris'
@@ -381,7 +470,10 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
               businessName: business.business_name,
               total: order.total
             })
-            scheduleAutoConfirm({ orderId, businessId: business.id })
+            if (process.env.DEMO_AUTOPAY === 'true') {
+              // MODE DEMO SAJA: menandai pesanan QRIS sebagai terbayar tanpa pembayaran nyata
+              scheduleAutoConfirm({ orderId, businessId: business.id })
+            }
           }
         } catch (qrisErr) {
           console.error('❌ Gagal generate QRIS:', qrisErr)
