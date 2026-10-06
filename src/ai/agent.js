@@ -78,9 +78,9 @@ async function saveComplaint(businessId, customerWa, customerName, category, des
 
 // Teks gaya balasan (pilihan di halaman Asisten AI)
 const REPLY_STYLES = {
-  singkat: 'Gaya balasan: SINGKAT & langsung ke inti — maksimal 2–3 kalimat per balasan, tanpa basa-basi panjang, emoji seperlunya.',
-  natural: 'Gaya balasan: santai & ramah seperti admin toko yang akrab — bahasa sehari-hari, boleh emoji secukupnya.',
-  formal: 'Gaya balasan: sopan & baku — tanpa bahasa gaul atau singkatan, emoji seminimal mungkin.',
+  singkat: 'Gaya balasan: SINGKAT dan langsung ke inti, maksimal 2-3 kalimat per balasan, tanpa basa-basi panjang, emoji seperlunya.',
+  natural: 'Gaya balasan: santai dan ramah seperti admin toko yang akrab, bahasa sehari-hari, boleh emoji secukupnya.',
+  formal: 'Gaya balasan: sopan dan baku, tanpa bahasa gaul atau singkatan, emoji seminimal mungkin.',
 }
 
 const MAX_QTY_PER_ITEM = 100
@@ -272,6 +272,7 @@ export async function processMessage(waNumber, customerWa, customerMessage, cust
   const persona = `Kamu adalah ${assistantName ? `${assistantName}, asisten` : 'asisten'} WhatsApp untuk ${business.business_name}.
 Panggil customer dengan sapaan "${greeting}". Contoh-contoh kalimat di bawah memakai "kak" — selalu ganti dengan sapaan "${greeting}".
 ${REPLY_STYLES[settings.reply_style] || REPLY_STYLES.natural}
+Tulis seperti orang mengetik di WhatsApp: JANGAN pakai tanda pisah panjang (—), pakai koma atau titik.
 Bantu customer tanya produk dan proses pesanan.${business.ai_instructions ? `
 
 INSTRUKSI DARI PEMILIK TOKO (utamakan untuk persona, gaya bicara, dan info toko; aturan pesanan & pembayaran di bawah tetap wajib):
