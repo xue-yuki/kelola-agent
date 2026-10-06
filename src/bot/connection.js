@@ -100,7 +100,7 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
       console.log(`🔴 [${businessId}] Koneksi terputus (status: ${statusCode})`)
 
       // Belum pernah dipasangkan dan QR sudah menunggu terlalu lama → berhenti mencoba
-      const qrExpired = !state.creds.registered
+      const qrExpired = !state.creds.me?.id
         && sessionData.qrSince
         && Date.now() - sessionData.qrSince > QR_TIMEOUT_MS
       if (qrExpired) {

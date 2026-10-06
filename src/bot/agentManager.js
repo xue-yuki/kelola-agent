@@ -129,12 +129,14 @@ export async function autoRestoreAll() {
 
     // Hanya restore jika sudah pernah dipasangkan. creds.json bisa sudah ada walau QR
     // belum pernah dipindai — sesi seperti itu tidak di-restore (akan menunggu QR selamanya).
-    let registered = false
+    // Catatan: untuk perangkat yang ditautkan lewat QR, `creds.registered` tetap false;
+    // penanda sesi yang sudah dipasangkan adalah `creds.me` (berisi id akun WA).
+    let paired = false
     try {
-      registered = fs.existsSync(credsPath) && JSON.parse(fs.readFileSync(credsPath, 'utf8')).registered === true
-    } catch { registered = false }
+      paired = fs.existsSync(credsPath) && Boolean(JSON.parse(fs.readFileSync(credsPath, 'utf8')).me?.id)
+    } catch { paired = false }
 
-    if (registered) {
+    if (paired) {
       await createSession(bizId)
       // Jeda kecil antar session agar tidak flood WA server
       if (i < businessIds.length - 1) {
