@@ -1,6 +1,6 @@
 import dotenv from 'dotenv'
 import supabase from '../db/supabase.js'
-import { generateQrisForOrder } from '../payment/qris.js'
+import { generateQrisForOrder, isValidQris } from '../payment/qris.js'
 
 dotenv.config()
 
@@ -254,6 +254,9 @@ export async function processMessage(waNumber, customerWa, customerMessage, cust
 
   const history = await getConversationHistory(business.id, customerWa)
 
+  // QRIS hanya ditawarkan kalau penjual sudah upload QRIS toko (dashboard → Pengaturan → Pembayaran)
+  const hasQris = isValidQris(business.qris_payload)
+
   const systemPrompt = `
 ${business.ai_instructions ?
   business.ai_instructions
@@ -273,21 +276,22 @@ ALUR WAJIB SEBELUM KONFIRMASI ORDER:
 2. WAJIB tanyakan nama lengkap customer jika belum disebutkan
 3. WAJIB tanyakan alamat lengkap pengiriman (jalan, RT/RW, kelurahan, kecamatan, kota) jika belum disebutkan
 4. Konfirmasi ulang pesanan beserta total harga
-5. WAJIB tanya metode pembayaran (kecuali customer sudah menyebut sendiri):
+${hasQris ? `5. WAJIB tanya metode pembayaran (kecuali customer sudah menyebut sendiri):
    - Tanyakan secara santai/casual (free-form, bukan kaku), contoh: "Bayarnya mau pake QRIS langsung dari sini atau COD tunai pas barang sampai kak?"
    - Jika customer bingung / ambigu / bilang "gimana enak" / "terserah" → push halus ke QRIS: "Aku bikinin QRIS aja ya kak, biar praktis 😁"
    - Jika customer dari awal sudah menyebut "qris" atau "cod" (atau sinonimnya seperti "cash", "tunai", "transfer", "scan"), LANGSUNG skip pertanyaan ini — jangan tanya ulang, biar customer nggak repot
-6. Setelah metode bayar jelas, BARU generate ORDER tag
+6. Setelah metode bayar jelas, BARU generate ORDER tag` : `5. Pembayaran toko ini HANYA COD (bayar tunai saat barang sampai). JANGAN tawarkan QRIS/transfer dan JANGAN tanya metode bayar. Jika customer minta QRIS/transfer/scan, jawab: "Untuk sekarang pembayarannya COD dulu ya kak, bayar di tempat pas barang sampai 🙏"
+6. Setelah pesanan jelas, BARU generate ORDER tag dengan payment_method "cod"`}
 
 PENTING:
 - Jangan sebut harga berbeda dari daftar di atas!
 - JANGAN PERNAH gunakan alamat palsu/contoh seperti "Jl. Sudirman" atau alamat placeholder!
 - Alamat HARUS dari customer langsung, jika belum ada TANYAKAN DULU!
-- Metode pembayaran WAJIB salah satu dari: "qris" atau "cod"
-- QRIS: setelah bayar, customer WAJIB kirim FOTO/screenshot bukti pembayaran di chat ini. Jika customer bilang "sudah bayar/transfer" tapi belum kirim foto, minta kirim screenshot bukti bayarnya. JANGAN pernah bilang pembayaran sudah diterima/lunas — penjual yang mengecek dan mengonfirmasi.
+${hasQris ? `- Metode pembayaran WAJIB salah satu dari: "qris" atau "cod"
+- QRIS: setelah bayar, customer WAJIB kirim FOTO/screenshot bukti pembayaran di chat ini. Jika customer bilang "sudah bayar/transfer" tapi belum kirim foto, minta kirim screenshot bukti bayarnya. JANGAN pernah bilang pembayaran sudah diterima/lunas — penjual yang mengecek dan mengonfirmasi.` : `- Metode pembayaran WAJIB "cod" (toko belum menerima QRIS)`}
 
 FORMAT KONFIRMASI PESANAN (setelah metode bayar jelas):
-Tulis rincian pesanan dalam FORMAT TEKS BIASA yang bisa dibaca customer, contoh untuk QRIS:
+Tulis rincian pesanan dalam FORMAT TEKS BIASA yang bisa dibaca customer, ${hasQris ? `contoh untuk QRIS:
 ---
 📦 *RINCIAN PESANAN*
 • Air RO 2 galon x Rp 5.500 = Rp 11.000
@@ -301,7 +305,7 @@ Bayar: QRIS
 Bentar ya kak, aku bikinin QRIS-nya... 💳
 ---
 
-Atau contoh untuk COD:
+Atau contoh untuk COD:` : `contoh:`}
 ---
 📦 *RINCIAN PESANAN*
 • Air RO 2 galon x Rp 5.500 = Rp 11.000
@@ -315,9 +319,9 @@ Siapin Rp 11.000 tunai ya kak buat Mas Adi. Langsung OTW! 🚚
 ---
 
 LALU di AKHIR PESAN (SETELAH teks rincian), tambahkan tag ORDER untuk sistem:
-<ORDER>{"items":[{"name":"Air RO","qty":2,"price":5500},{"name":"Gas 3KG","qty":1,"price":24000}],"total":35000,"customer_name":"Erlangga","customer_address":"Kodam Jaya Blok D1 No. 33","payment_method":"qris"}</ORDER>
+<ORDER>{"items":[{"name":"Air RO","qty":2,"price":5500},{"name":"Gas 3KG","qty":1,"price":24000}],"total":35000,"customer_name":"Erlangga","customer_address":"Kodam Jaya Blok D1 No. 33","payment_method":"${hasQris ? 'qris' : 'cod'}"}</ORDER>
 
-Field payment_method WAJIB diisi, nilainya HARUS "qris" atau "cod" (huruf kecil).
+Field payment_method WAJIB diisi, nilainya HARUS ${hasQris ? '"qris" atau "cod"' : '"cod"'} (huruf kecil).
 
 Tag ORDER HARUS di paling akhir pesan, JANGAN di tengah!
 
@@ -424,7 +428,17 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
       }
 
       // Normalize payment method (default: qris untuk backward-compat)
-      const paymentMethod = (order.payment_method || 'qris').toLowerCase() === 'cod' ? 'cod' : 'qris'
+      const paymentMethod = (order.payment_method || (hasQris ? 'qris' : 'cod')).toLowerCase() === 'cod' ? 'cod' : 'qris'
+
+      // Toko belum punya QRIS: jangan simpan pesanan QRIS (tidak ada QR yang bisa dibayar)
+      if (paymentMethod === 'qris' && !hasQris) {
+        console.warn(`🚫 [${business.id}] AI membuat pesanan QRIS padahal QRIS toko belum diatur — ditolak`)
+        return {
+          reply: 'Untuk sekarang pembayarannya COD dulu ya kak, bayar di tempat pas barang sampai 🙏 Lanjut pakai COD?',
+          receipt: null,
+          ownerNotif: quotaPrefix ? quotaPrefix.trim() : null,
+        }
+      }
 
       const orderId = await saveOrder(business.id, customerWa, order.items, order.total, order.customer_name, order.customer_address, paymentMethod, customerJid)
       // Data struk — dikirim sebagai gambar oleh handler (src/receipt/receipt.js)
@@ -466,8 +480,9 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
           if (orderId) {
             qris = await generateQrisForOrder({
               orderId,
-              businessId: business.id,
-              businessName: business.business_name,
+              qrisPayload: business.qris_payload,
+              merchantName: business.qris_merchant_name || business.business_name,
+              nmid: business.qris_nmid,
               total: order.total
             })
           }

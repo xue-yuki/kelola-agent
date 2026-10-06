@@ -1,15 +1,14 @@
 // ─────────────────────────────────────────────────────────────────────
-// QRIS Payment Module (DEMO MODE — Opsi 3A)
+// QRIS milik penjual
 //
-// Alur:
-//   1. generateQrisForOrder() — bikin payload QRIS dummy + PNG buffer
-//   2. Pelanggan kirim foto bukti bayar → src/payment/proof.js (status "menunggu_verifikasi")
-//   3. Penjual Konfirmasi / Tolak di dashboard → POST /api/payment (src/api/server.js)
-//      Tidak ada konfirmasi otomatis: bukti bayar bisa dipalsukan.
+// Penjual meng-upload foto QRIS statis toko di dashboard (Pengaturan → Pembayaran); isi kodenya
+// ada di businesses.qris_payload. Untuk tiap pesanan dibuat QR DINAMIS: tag 01 = "12", nominal
+// disisipkan (tag 54), CRC dihitung ulang → pembeli scan, nominal terisi, uang langsung masuk
+// ke rekening penjual. Logika sama dengan kelola.ai src/lib/qris.ts — ubah keduanya bersamaan.
 //
-// Catetan: payload di QR ini BUKAN QRIS real, cuma URL internal biar
-// kalau di-scan dari kamera HP bakal buka halaman konfirmasi (opsional Phase 2).
-// Buat production, replace generateQrisForOrder() dengan call ke Midtrans/Xendit.
+// Setelah QR dikirim: pelanggan kirim foto bukti bayar → src/payment/proof.js, lalu penjual
+// Konfirmasi / Tolak di dashboard (tidak ada konfirmasi otomatis: bukti bisa dipalsukan).
+// Belum ada QRIS penjual → bot hanya menawarkan COD (src/ai/agent.js).
 // ─────────────────────────────────────────────────────────────────────
 
 import QRCode from 'qrcode'
@@ -19,18 +18,14 @@ import supabase from '../db/supabase.js'
 // Config
 const QRIS_EXPIRY_MINUTES = 15
 
-// ─── EMVCo QRIS payload builder (mock — cuma buat demo visual) ─────────
-// Format QRIS asli: TLV (Tag-Length-Value) ala EMVCo, CRC16 di akhir.
-// Kalo di-scan app e-wallet real, akan RECOGNIZE sebagai QRIS tapi ERROR
-// (Merchant ID palsu). Cukup buat demo — customer LIHAT ini QRIS, ga bayar beneran.
-
+// ─── EMVCo: TLV (Tag-Length-Value), CRC16 di akhir ─────────────────────
 function tlv(tag, value) {
   const len = value.length.toString().padStart(2, '0')
   return `${tag}${len}${value}`
 }
 
 // CRC16-CCITT-FALSE (poly 0x1021, init 0xFFFF) — algoritma resmi QRIS
-function crc16(str) {
+export function crc16(str) {
   let crc = 0xFFFF
   for (let i = 0; i < str.length; i++) {
     crc ^= str.charCodeAt(i) << 8
@@ -42,70 +37,71 @@ function crc16(str) {
   return crc.toString(16).toUpperCase().padStart(4, '0')
 }
 
-function buildQrisPayload({ merchantName, merchantCity, amount, referenceId }) {
-  const cleanName = (merchantName || 'MERCHANT').toUpperCase().slice(0, 25)
-  const cleanCity = (merchantCity || 'PURWOKERTO').toUpperCase().slice(0, 15)
-
-  // Merchant Account Info (Tag 26) - ID.CO.QRIS.WWW format (dynamic)
-  const merchantInfo =
-    tlv('00', 'ID.CO.QRIS.WWW') +
-    tlv('01', '936000141' + Math.floor(Math.random() * 1e10).toString().padStart(10, '0')) +
-    tlv('02', 'ID' + Math.floor(Math.random() * 1e13).toString().padStart(13, '0'))
-
-  let payload =
-    tlv('00', '01') +                          // Payload Format Indicator
-    tlv('01', '12') +                          // Point of Initiation (12 = dynamic)
-    tlv('26', merchantInfo) +                  // Merchant Account Info
-    tlv('52', '5411') +                        // MCC (5411 = grocery)
-    tlv('53', '360') +                         // Currency (360 = IDR)
-    tlv('54', amount.toString()) +             // Transaction Amount
-    tlv('58', 'ID') +                          // Country
-    tlv('59', cleanName) +                     // Merchant Name
-    tlv('60', cleanCity) +                     // Merchant City
-    tlv('62', tlv('05', referenceId.slice(0, 25))) // Additional Data (Bill Number)
-
-  payload += '6304' // CRC16 tag + length placeholder
-  const crc = crc16(payload)
-  return payload + crc
+// "000201010211…" → [['00','01'], ['01','11'], …]; null kalau formatnya rusak
+export function parseTlv(s) {
+  const out = []
+  let i = 0
+  while (i < s.length) {
+    const tag = s.slice(i, i + 2)
+    const lenStr = s.slice(i + 2, i + 4)
+    const len = Number(lenStr)
+    if (!/^\d{2}$/.test(tag) || !/^\d{2}$/.test(lenStr) || i + 4 + len > s.length) return null
+    out.push([tag, s.slice(i + 4, i + 4 + len)])
+    i += 4 + len
+  }
+  return out
 }
 
+// QRIS penjual utuh? (diawali 000201 dan CRC cocok)
+export function isValidQris(payload) {
+  if (typeof payload !== 'string' || !payload.startsWith('000201')) return false
+  const body = payload.slice(0, -4)
+  return body.endsWith('6304') && crc16(body) === payload.slice(-4).toUpperCase() && !!parseTlv(payload)
+}
+
+// QR dinamis dari QRIS statis penjual: nominal terisi otomatis saat di-scan
+export function toDynamicQris(staticPayload, amount) {
+  const value = Math.round(Number(amount))
+  if (!Number.isFinite(value) || value <= 0) throw new Error('Nominal QRIS harus lebih dari 0')
+  const tags = parseTlv(String(staticPayload).trim())
+  if (!tags) throw new Error('QRIS toko tidak valid')
+  // Buang CRC lama, nominal & tip (55–57), set inisiasi dinamis, sisipkan nominal sesuai urutan tag
+  const kept = tags.filter(([t]) => !['01', '54', '55', '56', '57', '63'].includes(t))
+  kept.push(['01', '12'], ['54', String(value)])
+  kept.sort((a, b) => Number(a[0]) - Number(b[0]))
+  const body = kept.map(([t, v]) => tlv(t, v)).join('') + '6304'
+  return body + crc16(body)
+}
 
 /**
- * Generate QRIS untuk 1 order.
+ * QR pembayaran untuk 1 pesanan dari QRIS penjual.
  * @param {object} params
  * @param {string} params.orderId - UUID order
- * @param {string} params.businessId
- * @param {string} params.businessName
- * @param {number} params.total - amount in IDR
+ * @param {string} params.qrisPayload - QRIS statis penjual (businesses.qris_payload)
+ * @param {string} [params.merchantName] - nama merchant di QRIS (businesses.qris_merchant_name)
+ * @param {string|null} [params.nmid] - NMID QRIS (businesses.qris_nmid)
+ * @param {number} params.total - nominal (Rp)
  * @returns {Promise<{ qrisBuffer: Buffer, qrisPayload: string, expiresAt: Date }>}
  */
-export async function generateQrisForOrder({ orderId, businessId, businessName, total }) {
+export async function generateQrisForOrder({ orderId, qrisPayload, merchantName, nmid, total }) {
   const expiresAt = new Date(Date.now() + QRIS_EXPIRY_MINUTES * 60 * 1000)
-  const referenceId = orderId.replace(/-/g, '').slice(0, 20)
-
-  // Fake EMVCo QRIS payload (visual demo — kalau di-scan e-wallet akan error merchant)
-  const payload = buildQrisPayload({
-    merchantName: businessName,
-    merchantCity: 'PURWOKERTO',
-    amount: total,
-    referenceId
-  })
+  const payload = toDynamicQris(qrisPayload, total)
 
   // Generate raw QR sebagai PNG buffer
   const qrRaw = await QRCode.toBuffer(payload, {
-    errorCorrectionLevel: 'H',   // High biar tetep readable walau di-composite
+    errorCorrectionLevel: 'M',
     type: 'png',
     width: 520,
     margin: 1,
     color: { dark: '#000000', light: '#FFFFFF' }
   })
 
-  // Compose jadi kartu QRIS-style: header merah putih + QR di tengah + footer info
+  // Kartu: header QRIS + QR di tengah + nama merchant, NMID, nominal
   const qrisBuffer = await composeQrisCard({
     qr: qrRaw,
-    merchantName: (businessName || 'MERCHANT').toUpperCase(),
+    merchantName: (merchantName || 'MERCHANT').toUpperCase(),
+    nmid,
     amount: total,
-    referenceId
   })
 
   // Simpan ke DB
@@ -120,11 +116,10 @@ export async function generateQrisForOrder({ orderId, businessId, businessName, 
   return { qrisBuffer, qrisPayload: payload, expiresAt }
 }
 
-
 // ─── Compose kartu QRIS-style (SVG overlay via sharp) ────────────────
 // Layout: header merah "QRIS" + garis putih tipis + QR (520px) + footer info.
 // Ini yang bikin visual keliatan legit — bukan cuma QR code polos.
-async function composeQrisCard({ qr, merchantName, amount, referenceId }) {
+async function composeQrisCard({ qr, merchantName, nmid, amount }) {
   const W = 600
   const HEADER_H = 130
   const QR_SIZE = 520
@@ -135,7 +130,7 @@ async function composeQrisCard({ qr, merchantName, amount, referenceId }) {
 
   const safeName = merchantName.slice(0, 30).replace(/&/g, '&amp;').replace(/</g, '&lt;')
   const amountStr = 'Rp ' + amount.toLocaleString('id-ID')
-  const refShort = referenceId.slice(0, 12).toUpperCase()
+  const nmidLine = nmid ? `NMID: ${String(nmid).replace(/[^A-Za-z0-9]/g, '').slice(0, 20)}` : ''
 
   // Build SVG overlay: header + footer + labels
   const svg = `
@@ -170,7 +165,7 @@ async function composeQrisCard({ qr, merchantName, amount, referenceId }) {
   <!-- Footer content -->
   <rect x="0" y="${QR_PAD_Y + QR_SIZE + 8}" width="${W}" height="${FOOTER_H - 8}" fill="#FFFFFF"/>
   <text x="${W / 2}" y="${QR_PAD_Y + QR_SIZE + 40}" text-anchor="middle" class="merchant">${safeName}</text>
-  <text x="${W / 2}" y="${QR_PAD_Y + QR_SIZE + 60}" text-anchor="middle" class="nmid">NMID: ID10${refShort}  ·  A01</text>
+  <text x="${W / 2}" y="${QR_PAD_Y + QR_SIZE + 60}" text-anchor="middle" class="nmid">${nmidLine}</text>
 
   <!-- Divider -->
   <line x1="60" y1="${QR_PAD_Y + QR_SIZE + 78}" x2="${W - 60}" y2="${QR_PAD_Y + QR_SIZE + 78}" stroke="#E5E5E5" stroke-width="1"/>
