@@ -3,11 +3,13 @@ import {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore
+  makeCacheableSignalKeyStore,
+  generateMessageIDV2
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import pino from 'pino'
 import { handleMessage } from './handler.js'
+import { rememberSent, isBotSent, markOwnerReply, messageAgeMs } from './settings.js'
 
 const logger = pino({ level: 'silent' })
 
@@ -45,6 +47,15 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
     keepAliveIntervalMs: 15000,
     retryRequestDelayMs: 2000,
   })
+
+  // Semua kiriman bot (balasan, struk, QRIS, broadcast, notifikasi) diberi messageId sendiri dan
+  // dicatat, supaya tidak dikira balasan manual pemilik (fitur ambil alih, src/bot/settings.js).
+  const rawSendMessage = sock.sendMessage.bind(sock)
+  sock.sendMessage = (jid, content, options = {}) => {
+    const messageId = options.messageId || generateMessageIDV2(sock.user?.id)
+    rememberSent(messageId)
+    return rawSendMessage(jid, content, { ...options, messageId })
+  }
 
   // Update socket di sessionData
   sessionData.sock = sock
@@ -132,6 +143,30 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
     }
   })
 
+  // ─── Ambil alih manual: catat chat yang dibalas pemilik sendiri ──────────
+  // Pesan kiriman bot muncul lagi sebagai event 'append' (diabaikan di bawah) dan ID-nya tercatat;
+  // balasan dari HP/WA Web pemilik datang sebagai 'notify' + fromMe.
+  const noteOwnerReply = (msg) => {
+    const jid = msg.key.remoteJid || ''
+    if (!jid || /@(g\.us|broadcast|newsletter)$/.test(jid) || jid === 'status@broadcast') return
+    if (isBotSent(msg.key.id)) return
+    const rawId = jid.split('@')[0]
+    const ownNumber = (sock.user?.id || '').split(':')[0].split('@')[0]
+    if (rawId === ownNumber) return // chat ke diri sendiri (notifikasi pemilik)
+    const ageMs = messageAgeMs(msg)
+    if (ageMs > 48 * 3_600_000) return
+    // Kunci = nomor HP pelanggan (jid bisa @lid atau @s.whatsapp.net), sama dengan handler.js
+    let phone = rawId
+    if (jid.endsWith('@lid')) {
+      const alt = msg.key.remoteJidAlt
+      phone = alt && !alt.endsWith('@lid') ? alt.split('@')[0] : (lidMap.get(rawId) || rawId)
+    }
+    const at = Date.now() - Math.max(0, ageMs)
+    markOwnerReply(businessId, phone, at)
+    if (phone !== rawId) markOwnerReply(businessId, rawId, at)
+    console.log(`🙋 [${businessId}] Pemilik membalas manual ke ${phone} — bot diam sementara di chat ini`)
+  }
+
   // ─── Incoming message handler ────────────────────────────────────────────
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return
@@ -147,7 +182,12 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
     // Satu event bisa berisi beberapa pesan (mis. pesan tertahan saat offline) — proses semuanya;
     // handler akan menggabungkan pesan beruntun dari chat yang sama.
     for (const msg of messages) {
-      if (!msg?.message || msg.key.fromMe) continue
+      if (!msg?.message) continue
+      if (msg.key.fromMe) {
+        // Dikirim dari nomor toko tapi bukan oleh bot = pemilik membalas sendiri (HP / WA Web)
+        noteOwnerReply(msg)
+        continue
+      }
       try {
         await handleMessage(activeSock, msg, businessId, lidMap)
       } catch (err) {

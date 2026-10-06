@@ -1,6 +1,7 @@
 import dotenv from 'dotenv'
 import supabase from '../db/supabase.js'
 import { generateQrisForOrder, isValidQris } from '../payment/qris.js'
+import { getBotSettings } from '../bot/settings.js'
 
 dotenv.config()
 
@@ -73,6 +74,13 @@ async function saveComplaint(businessId, customerWa, customerName, category, des
 
   if (error) console.error('❌ Error saving complaint:', error)
   else console.log(`🚨 Komplain disimpan dari ${customerWa}: ${category}`)
+}
+
+// Teks gaya balasan (pilihan di halaman Asisten AI)
+const REPLY_STYLES = {
+  singkat: 'Gaya balasan: SINGKAT & langsung ke inti — maksimal 2–3 kalimat per balasan, tanpa basa-basi panjang, emoji seperlunya.',
+  natural: 'Gaya balasan: santai & ramah seperti admin toko yang akrab — bahasa sehari-hari, boleh emoji secukupnya.',
+  formal: 'Gaya balasan: sopan & baku — tanpa bahasa gaul atau singkatan, emoji seminimal mungkin.',
 }
 
 const MAX_QTY_PER_ITEM = 100
@@ -223,7 +231,7 @@ async function saveOrder(businessId, customerWa, items, total, customerName, cus
   return savedOrder?.id || null
 }
 
-export async function processMessage(waNumber, customerWa, customerMessage, customerJid) {
+export async function processMessage(waNumber, customerWa, customerMessage, customerJid, { closedUntilText = null } = {}) {
   const context = await getBusinessContext(waNumber)
   if (!context) return { reply: 'Maaf, bisnis ini belum terdaftar di Kelola.ai.', receipt: null }
 
@@ -257,14 +265,22 @@ export async function processMessage(waNumber, customerWa, customerMessage, cust
   // QRIS hanya ditawarkan kalau penjual sudah upload QRIS toko (dashboard → Pengaturan → Pembayaran)
   const hasQris = isValidQris(business.qris_payload)
 
+  // Persona & gaya dari halaman Asisten AI (bot_settings) + instruksi bebas pemilik (ai_instructions)
+  const settings = await getBotSettings(business.id)
+  const greeting = (settings.greeting || 'Kak').trim()
+  const assistantName = (settings.assistant_name || '').trim()
+  const persona = `Kamu adalah ${assistantName ? `${assistantName}, asisten` : 'asisten'} WhatsApp untuk ${business.business_name}.
+Panggil customer dengan sapaan "${greeting}". Contoh-contoh kalimat di bawah memakai "kak" — selalu ganti dengan sapaan "${greeting}".
+${REPLY_STYLES[settings.reply_style] || REPLY_STYLES.natural}
+Bantu customer tanya produk dan proses pesanan.${business.ai_instructions ? `
+
+INSTRUKSI DARI PEMILIK TOKO (utamakan untuk persona, gaya bicara, dan info toko; aturan pesanan & pembayaran di bawah tetap wajib):
+${business.ai_instructions}` : ''}${closedUntilText ? `
+
+INFO JAM BUKA: toko sedang TUTUP sekarang dan buka lagi ${closedUntilText}. Tetap jawab pertanyaan dan terima pesanan seperti biasa, tapi sampaikan bahwa pesanan baru diproses/dikirim saat toko buka (${closedUntilText}).` : ''}`
+
   const systemPrompt = `
-${business.ai_instructions ?
-  business.ai_instructions
-  :
-  `Kamu adalah asisten AI untuk ${business.business_name}.
-Balas dengan ramah, bahasa Indonesia santai.
-Bantu customer tanya produk dan proses pesanan.`
-}
+${persona}
 
 PRODUK TERSEDIA:
 ${products?.map(p =>

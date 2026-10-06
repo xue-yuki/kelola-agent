@@ -2,6 +2,7 @@ import { processMessage } from '../ai/agent.js'
 import { sendReceipt } from '../receipt/receipt.js'
 import { getImageInfo, handlePaymentProof } from '../payment/proof.js'
 import { checkIncoming } from '../lib/rateLimiter.js'
+import { getBotSettings, isOpenNow, isTakenOver, messageAgeMs, nextOpenText, closedMessage, shouldSendClosedNotice } from './settings.js'
 
 // ─── Gabungkan pesan beruntun ────────────────────────────────────────────────
 // Pelanggan sering mengirim beberapa pesan pendek beruntun ("halo", "p", "hai").
@@ -32,6 +33,19 @@ export async function handleMessage(sock, msg, businessId, lidMap) {
       // Fallback: cari di lidMap session ini
       customerWa = lidMap?.get(rawId) || rawId
     }
+  }
+
+  // ─── Pengaturan bot (halaman Asisten AI) ──────────────────────────────────
+  const settings = await getBotSettings(businessId)
+  if (!settings.enabled) return
+  const ageMs = messageAgeMs(msg)
+  if (settings.ignore_stale_enabled && ageMs > settings.stale_minutes * 60_000) {
+    console.log(`⏭️ [${businessId}] Pesan basi dari ${customerWa} (${Math.round(ageMs / 60_000)} menit) — tidak dibalas`)
+    return
+  }
+  if (isTakenOver(businessId, customerWa, settings) || isTakenOver(businessId, rawId, settings)) {
+    console.log(`🙋 [${businessId}] Chat ${customerWa} sedang dibalas pemilik — bot diam`)
+    return
   }
 
   // Extract teks pesan (atau foto — mis. bukti bayar QRIS)
@@ -74,6 +88,22 @@ export async function handleMessage(sock, msg, businessId, lidMap) {
     if (!text) return
   }
 
+  // Di luar jam operasional (bukti bayar di atas tetap diproses)
+  let closedUntilText = null
+  if (!isOpenNow(settings)) {
+    if (settings.outside_hours_mode === 'silent') return
+    if (settings.outside_hours_mode === 'auto_reply') {
+      if (shouldSendClosedNotice(businessId, jid)) {
+        try {
+          await sock.sendMessage(jid, { text: closedMessage(settings, settings.business_name) })
+          console.log(`🌙 [${businessId}] Toko tutup — pesan otomatis ke ${customerWa}`)
+        } catch (err) { console.error(`❌ [${businessId}] Gagal kirim pesan tutup:`, err?.message) }
+      }
+      return
+    }
+    closedUntilText = nextOpenText(settings) || 'secepatnya' // ai_serve: AI tetap melayani
+  }
+
   // Tampung dulu; balas setelah pelanggan berhenti mengetik selama DEBOUNCE_MS
   const key = `${businessId}:${jid}`
   const entry = pending.get(key) || { texts: [] }
@@ -81,6 +111,7 @@ export async function handleMessage(sock, msg, businessId, lidMap) {
   entry.lastMsg = msg
   entry.sock = sock
   entry.customerWa = customerWa
+  entry.closedUntilText = closedUntilText
   if (entry.timer) clearTimeout(entry.timer)
   pending.set(key, entry)
 
@@ -95,7 +126,7 @@ export async function handleMessage(sock, msg, businessId, lidMap) {
     }
     const prev = chains.get(key) || Promise.resolve()
     const next = prev
-      .then(() => replyToCustomer(entry.sock, jid, entry.lastMsg, combined, businessId, entry.customerWa))
+      .then(() => replyToCustomer(entry.sock, jid, entry.lastMsg, combined, businessId, entry.customerWa, { closedUntilText: entry.closedUntilText }))
       .catch((err) => console.error(`❌ [${businessId}] Gagal memproses pesan gabungan:`, err?.message || err))
       .finally(() => { if (chains.get(key) === next) chains.delete(key) })
     chains.set(key, next)
@@ -106,7 +137,7 @@ export async function handleMessage(sock, msg, businessId, lidMap) {
 }
 
 // Proses teks (sudah digabung) dengan AI lalu kirim balasan, struk, QRIS, dan notifikasi.
-async function replyToCustomer(sock, jid, msg, text, businessId, customerWa) {
+async function replyToCustomer(sock, jid, msg, text, businessId, customerWa, { closedUntilText = null } = {}) {
   // Nomor WA bot (nomor yang di-scan oleh bisnis ini)
   const botWa = sock.user.id.split(':')[0]
 
@@ -115,7 +146,7 @@ async function replyToCustomer(sock, jid, msg, text, businessId, customerWa) {
     await sock.sendPresenceUpdate('composing', jid)
 
     // Proses dengan AI
-    const { reply, receipt, ownerNotif, qris } = await processMessage(botWa, customerWa, text, jid)
+    const { reply, receipt, ownerNotif, qris } = await processMessage(botWa, customerWa, text, jid, { closedUntilText })
 
     // Kirim balasan utama ke pelanggan
     await sock.sendMessage(jid, { text: reply }, { quoted: msg })
