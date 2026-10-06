@@ -145,8 +145,11 @@ function getBroadcastState(businessId) {
   return broadcastStates.get(businessId)
 }
 
-app.post('/api/broadcast', limitBroadcast, async (req, res) => {
-  const { businessId, recipients, template } = req.body
+// Dashboard memanggil lewat agent-proxy → /api/broadcast/:businessId (businessId sudah diverifikasi
+// sebagai milik pengguna). businessId dari URL diutamakan; dari body hanya untuk pemanggilan lama.
+app.post(['/api/broadcast/:businessId', '/api/broadcast'], limitBroadcast, async (req, res) => {
+  const businessId = req.params.businessId || req.body?.businessId
+  const { recipients, template } = req.body || {}
 
   // Validasi input
   if (!businessId || typeof businessId !== 'string') {
