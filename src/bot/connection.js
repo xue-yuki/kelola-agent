@@ -11,6 +11,10 @@ import { handleMessage } from './handler.js'
 
 const logger = pino({ level: 'silent' })
 
+// Sesi yang QR-nya tidak kunjung dipindai berhenti mencoba setelah batas ini
+// (sebelumnya reconnect selamanya tiap 60 detik). Pemilik cukup klik "Hubungkan" lagi.
+const QR_TIMEOUT_MS = Number(process.env.QR_TIMEOUT_MS || 30 * 60 * 1000)
+
 // ─── LID → phone number mapping (per session) ────────────────────────────────
 // Map<businessId, Map<lid, phoneNumber>>
 const lidMaps = new Map()
@@ -70,6 +74,7 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
     if (qr) {
       sessionData.qr = qr
       sessionData.status = 'connecting'
+      if (!sessionData.qrSince) sessionData.qrSince = Date.now()
       console.log(`📱 [${businessId}] QR code siap untuk di-scan.`)
     }
 
@@ -81,6 +86,7 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
     } else if (connection === 'open') {
       sessionData.status = 'connected'
       sessionData.qr = null
+      sessionData.qrSince = null
       sessionData.retryCount = 0
       console.log(`✅ [${businessId}] Terhubung ke WhatsApp!`)
 
@@ -92,6 +98,17 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut
 
       console.log(`🔴 [${businessId}] Koneksi terputus (status: ${statusCode})`)
+
+      // Belum pernah dipasangkan dan QR sudah menunggu terlalu lama → berhenti mencoba
+      const qrExpired = !state.creds.registered
+        && sessionData.qrSince
+        && Date.now() - sessionData.qrSince > QR_TIMEOUT_MS
+      if (qrExpired) {
+        console.log(`⏹️ [${businessId}] QR tidak dipindai selama ${Math.round(QR_TIMEOUT_MS / 60000)} menit, berhenti mencoba. Klik "Hubungkan" di dashboard untuk mulai lagi.`)
+        sessionData.sock = null
+        sessionData.qrSince = null
+        return
+      }
 
       if (shouldReconnect && !sessionData._destroyed) {
         sessionData.retryCount = (sessionData.retryCount || 0) + 1
@@ -120,9 +137,6 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
     if (type !== 'notify') return
     if (sessionData._destroyed) return
 
-    const msg = messages[0]
-    if (!msg?.message || msg.key.fromMe) return
-
     if (sessionData.status !== 'connected' || !sessionData.sock) {
       console.log(`⚠️ [${businessId}] Pesan diterima saat koneksi tidak stabil, skip.`)
       return
@@ -130,10 +144,15 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
 
     const activeSock = sessionData.sock
 
-    try {
-      await handleMessage(activeSock, msg, businessId, lidMap)
-    } catch (err) {
-      console.error(`❌ [${businessId}] Unhandled error in handleMessage:`, err?.message || err)
+    // Satu event bisa berisi beberapa pesan (mis. pesan tertahan saat offline) — proses semuanya;
+    // handler akan menggabungkan pesan beruntun dari chat yang sama.
+    for (const msg of messages) {
+      if (!msg?.message || msg.key.fromMe) continue
+      try {
+        await handleMessage(activeSock, msg, businessId, lidMap)
+      } catch (err) {
+        console.error(`❌ [${businessId}] Unhandled error in handleMessage:`, err?.message || err)
+      }
     }
   })
 }

@@ -2,8 +2,23 @@ import { processMessage } from '../ai/agent.js'
 import { onOrderPaid } from '../payment/qris.js'
 import { checkIncoming } from '../lib/rateLimiter.js'
 
+// ─── Gabungkan pesan beruntun ────────────────────────────────────────────────
+// Pelanggan sering mengirim beberapa pesan pendek beruntun ("halo", "p", "hai").
+// Pesan dari chat yang sama ditampung sebentar lalu dibalas SEKALI dengan teks gabungan.
+const DEBOUNCE_MS = Number(process.env.MESSAGE_DEBOUNCE_MS || 4000)
+const MAX_BUFFERED = 10
+const pending = new Map() // key → { sock, lastMsg, texts[], customerWa, timer }
+const chains = new Map()  // key → Promise (balasan diproses berurutan per chat)
+
 export async function handleMessage(sock, msg, businessId, lidMap) {
   const jid = msg.key.remoteJid
+
+  // Filter: JANGAN balas grup, status/broadcast, atau Saluran WhatsApp
+  if (jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@newsletter')) {
+    console.log(`⏭️ [${businessId}] Mengabaikan pesan dari grup/status/saluran: ${jid}`)
+    return
+  }
+
   const rawId = jid.split('@')[0]
 
   // Resolve @lid (WhatsApp internal device ID) ke nomor telepon asli
@@ -18,21 +33,12 @@ export async function handleMessage(sock, msg, businessId, lidMap) {
     }
   }
 
-  // Nomor WA bot (nomor yang di-scan oleh bisnis ini)
-  const botWa = sock.user.id.split(':')[0]
-
   // Extract teks pesan
   const text = msg.message?.conversation
     || msg.message?.extendedTextMessage?.text
     || ''
 
   if (!text) return
-
-  // Filter 1: JANGAN balas pesan dari Grup atau Broadcast Status
-  if (jid.endsWith('@g.us') || jid.endsWith('@broadcast')) {
-    console.log(`⏭️ [${businessId}] Mengabaikan pesan dari grup/status: ${jid}`)
-    return
-  }
 
   console.log(`📩 [${businessId}] Pesan dari ${customerWa}: ${text}`)
 
@@ -51,6 +57,42 @@ export async function handleMessage(sock, msg, businessId, lidMap) {
     }
     return
   }
+
+  // Tampung dulu; balas setelah pelanggan berhenti mengetik selama DEBOUNCE_MS
+  const key = `${businessId}:${jid}`
+  const entry = pending.get(key) || { texts: [] }
+  entry.texts.push(text)
+  entry.lastMsg = msg
+  entry.sock = sock
+  entry.customerWa = customerWa
+  if (entry.timer) clearTimeout(entry.timer)
+  pending.set(key, entry)
+
+  // Tampilkan "sedang mengetik…" segera supaya pelanggan tahu pesannya diterima
+  sock.sendPresenceUpdate('composing', jid).catch(() => {})
+
+  const flush = () => {
+    pending.delete(key)
+    const combined = entry.texts.join('\n')
+    if (entry.texts.length > 1) {
+      console.log(`🧩 [${businessId}] Menggabungkan ${entry.texts.length} pesan dari ${customerWa}`)
+    }
+    const prev = chains.get(key) || Promise.resolve()
+    const next = prev
+      .then(() => replyToCustomer(entry.sock, jid, entry.lastMsg, combined, businessId, entry.customerWa))
+      .catch((err) => console.error(`❌ [${businessId}] Gagal memproses pesan gabungan:`, err?.message || err))
+      .finally(() => { if (chains.get(key) === next) chains.delete(key) })
+    chains.set(key, next)
+  }
+
+  if (entry.texts.length >= MAX_BUFFERED) flush()
+  else entry.timer = setTimeout(flush, DEBOUNCE_MS)
+}
+
+// Proses teks (sudah digabung) dengan AI lalu kirim balasan, struk, QRIS, dan notifikasi.
+async function replyToCustomer(sock, jid, msg, text, businessId, customerWa) {
+  // Nomor WA bot (nomor yang di-scan oleh bisnis ini)
+  const botWa = sock.user.id.split(':')[0]
 
   try {
     // Typing indicator

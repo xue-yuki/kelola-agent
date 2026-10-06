@@ -127,15 +127,21 @@ export async function autoRestoreAll() {
     const bizId = businessIds[i]
     const credsPath = path.join(AUTH_BASE_DIR, bizId, 'creds.json')
 
-    // Hanya restore jika creds.json sudah ada (pernah scan QR)
-    if (fs.existsSync(credsPath)) {
+    // Hanya restore jika sudah pernah dipasangkan. creds.json bisa sudah ada walau QR
+    // belum pernah dipindai — sesi seperti itu tidak di-restore (akan menunggu QR selamanya).
+    let registered = false
+    try {
+      registered = fs.existsSync(credsPath) && JSON.parse(fs.readFileSync(credsPath, 'utf8')).registered === true
+    } catch { registered = false }
+
+    if (registered) {
       await createSession(bizId)
       // Jeda kecil antar session agar tidak flood WA server
       if (i < businessIds.length - 1) {
         await new Promise(r => setTimeout(r, 2000))
       }
     } else {
-      console.log(`⚠️  [${bizId}] Auth folder ada tapi belum pernah scan QR, skip restore.`)
+      console.log(`⚠️  [${bizId}] Auth folder ada tapi belum pernah dipasangkan (QR belum dipindai), skip restore.`)
     }
   }
 }
