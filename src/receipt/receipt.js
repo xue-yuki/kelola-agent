@@ -214,6 +214,26 @@ ${itemLines}
 Pesanan Kak ${name} segera kami proses! 🚀`
 }
 
+// Data struk dari baris `orders` + `businesses` (mis. saat penjual konfirmasi pembayaran QRIS)
+export function receiptFromOrder(order, business) {
+  let items = order.items
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items) } catch { items = [] }
+  }
+  return {
+    businessName: business.business_name,
+    businessAddress: business.address,
+    businessWa: business.wa_number,
+    orderId: order.id,
+    createdAt: order.created_at,
+    items,
+    total: order.total,
+    customerName: order.customer_name,
+    customerAddress: order.customer_address,
+    paymentMethod: order.payment_method,
+  }
+}
+
 // Kirim struk ke pelanggan: gambar + caption, cadangan teks. Mengembalikan 'image' | 'text'.
 export async function sendReceipt(sock, jid, data) {
   try {

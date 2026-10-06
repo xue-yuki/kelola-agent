@@ -9,6 +9,7 @@ import {
   createSession,
   destroySession,
 } from '../bot/agentManager.js'
+import { decidePayment } from '../payment/proof.js'
 
 dotenv.config()
 
@@ -40,6 +41,7 @@ const limitBroadcast = makeLimiter(3,  60_000, 'Terlalu banyak broadcast. Coba l
 const limitQR        = makeLimiter(30, 60_000, 'Terlalu banyak request QR. Coba lagi dalam 1 menit.')           // 30x/menit
 const limitStatus    = makeLimiter(60, 60_000, 'Terlalu banyak request status. Coba lagi dalam 1 menit.')       // 60x/menit
 const limitGlobal    = makeLimiter(100, 60_000, 'Terlalu banyak request. Coba lagi dalam 1 menit.')             // 100x/menit fallback
+const limitPayment   = makeLimiter(30, 60_000, 'Terlalu banyak konfirmasi pembayaran. Coba lagi dalam 1 menit.') // 30x/menit
 
 // ─── Secret Key Middleware ────────────────────────────────────────────────────
 // Semua endpoint kecuali /api/health wajib menyertakan header:
@@ -238,6 +240,24 @@ app.get('/api/broadcast/status/:businessId', (req, res) => {
 // Backward compat — status broadcast tanpa businessId (deprecated)
 app.get('/api/broadcast/status', (req, res) => {
   res.json({ deprecated: true, message: 'Gunakan /api/broadcast/status/:businessId' })
+})
+
+// ─── Keputusan penjual atas pembayaran QRIS ──────────────────────────────────
+// Dashboard → agent-proxy (sudah cek login & kepemilikan bisnis) → /api/payment/:businessId
+// Body: { orderId, action: 'confirm' | 'reject' }. Lihat src/payment/proof.js.
+app.post('/api/payment/:businessId', limitPayment, async (req, res) => {
+  const { businessId } = req.params
+  const { orderId, action } = req.body || {}
+  if (typeof orderId !== 'string' || !['confirm', 'reject'].includes(action)) {
+    return res.status(400).json({ error: 'orderId dan action (confirm/reject) wajib diisi' })
+  }
+  try {
+    const { status, body } = await decidePayment({ businessId, orderId, action, session: getSession(businessId) })
+    res.status(status).json(body)
+  } catch (err) {
+    console.error(`❌ [${businessId}] /api/payment gagal:`, err?.message || err)
+    res.status(500).json({ error: 'Gagal memproses pembayaran' })
+  }
 })
 
 // ─── Start server ─────────────────────────────────────────────────────────────

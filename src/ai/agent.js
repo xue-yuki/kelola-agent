@@ -1,6 +1,6 @@
 import dotenv from 'dotenv'
 import supabase from '../db/supabase.js'
-import { generateQrisForOrder, scheduleAutoConfirm } from '../payment/qris.js'
+import { generateQrisForOrder } from '../payment/qris.js'
 
 dotenv.config()
 
@@ -151,7 +151,7 @@ async function validateOrder(businessId, order) {
   }
 }
 
-async function saveOrder(businessId, customerWa, items, total, customerName, customerAddress, paymentMethod) {
+async function saveOrder(businessId, customerWa, items, total, customerName, customerAddress, paymentMethod, customerJid) {
   const { data: savedOrder, error: orderError } = await supabase.from('orders').insert({
     business_id: businessId,
     customer_name: customerName || customerWa,
@@ -160,7 +160,12 @@ async function saveOrder(businessId, customerWa, items, total, customerName, cus
     total,
     status: 'menunggu',
     items,
-    payment_method: paymentMethod || null
+    payment_method: paymentMethod || null,
+    // Kontak pelanggan: dipakai dashboard & untuk mengabari pelanggan saat penjual konfirmasi bayar
+    customer_wa: customerWa,
+    customer_jid: customerJid || null,
+    // QRIS: lunas hanya setelah penjual cek bukti bayar (src/payment/proof.js, POST /api/payment)
+    payment_status: paymentMethod === 'qris' ? 'menunggu_bayar' : null,
   }).select('id').single()
 
   if (orderError) console.error("Error inserting order:", orderError);
@@ -218,7 +223,7 @@ async function saveOrder(businessId, customerWa, items, total, customerName, cus
   return savedOrder?.id || null
 }
 
-export async function processMessage(waNumber, customerWa, customerMessage) {
+export async function processMessage(waNumber, customerWa, customerMessage, customerJid) {
   const context = await getBusinessContext(waNumber)
   if (!context) return { reply: 'Maaf, bisnis ini belum terdaftar di Kelola.ai.', receipt: null }
 
@@ -279,6 +284,7 @@ PENTING:
 - JANGAN PERNAH gunakan alamat palsu/contoh seperti "Jl. Sudirman" atau alamat placeholder!
 - Alamat HARUS dari customer langsung, jika belum ada TANYAKAN DULU!
 - Metode pembayaran WAJIB salah satu dari: "qris" atau "cod"
+- QRIS: setelah bayar, customer WAJIB kirim FOTO/screenshot bukti pembayaran di chat ini. Jika customer bilang "sudah bayar/transfer" tapi belum kirim foto, minta kirim screenshot bukti bayarnya. JANGAN pernah bilang pembayaran sudah diterima/lunas — penjual yang mengecek dan mengonfirmasi.
 
 FORMAT KONFIRMASI PESANAN (setelah metode bayar jelas):
 Tulis rincian pesanan dalam FORMAT TEKS BIASA yang bisa dibaca customer, contoh untuk QRIS:
@@ -420,7 +426,7 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
       // Normalize payment method (default: qris untuk backward-compat)
       const paymentMethod = (order.payment_method || 'qris').toLowerCase() === 'cod' ? 'cod' : 'qris'
 
-      const orderId = await saveOrder(business.id, customerWa, order.items, order.total, order.customer_name, order.customer_address, paymentMethod)
+      const orderId = await saveOrder(business.id, customerWa, order.items, order.total, order.customer_name, order.customer_address, paymentMethod, customerJid)
       // Data struk — dikirim sebagai gambar oleh handler (src/receipt/receipt.js)
       receipt = {
         businessName: business.business_name,
@@ -453,7 +459,8 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
 
       // ─── Branch berdasarkan metode pembayaran ────────────────────────
       if (paymentMethod === 'qris') {
-        // QRIS path: generate QR, HOLD struk (dikirim setelah bayar via callback)
+        // QRIS path: kirim QR + minta bukti bayar. Struk dikirim setelah penjual konfirmasi
+        // pembayaran di dashboard (POST /api/payment → src/api/server.js).
         let qris = null
         try {
           if (orderId) {
@@ -463,10 +470,6 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
               businessName: business.business_name,
               total: order.total
             })
-            if (process.env.DEMO_AUTOPAY === 'true') {
-              // MODE DEMO SAJA: menandai pesanan QRIS sebagai terbayar tanpa pembayaran nyata
-              scheduleAutoConfirm({ orderId, businessId: business.id })
-            }
           }
         } catch (qrisErr) {
           console.error('❌ Gagal generate QRIS:', qrisErr)
@@ -474,7 +477,7 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
 
         return {
           reply: cleanReply,
-          receipt: null,       // struk di-HOLD, dikirim di callback lunas
+          receipt: null,       // struk dikirim setelah penjual konfirmasi pembayaran
           ownerNotif,
           paymentMethod: 'qris',
           qris: qris ? {
@@ -483,7 +486,6 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
             expiresAt: qris.expiresAt,
             total: order.total,
             customerName: order.customer_name,
-            receipt        // pass struk ke handler biar dikirim pas lunas
           } : null
         }
       } else {

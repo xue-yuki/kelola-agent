@@ -1,5 +1,6 @@
 import { startServer } from './api/server.js'
 import { autoRestoreAll } from './bot/agentManager.js'
+import { startProofCleanup } from './payment/proof.js'
 import dotenv from 'dotenv'
 
 dotenv.config()
@@ -27,3 +28,6 @@ startServer()
 autoRestoreAll().catch(err => {
   console.error('❌ Error during auto-restore:', err.message)
 })
+
+// Hapus foto bukti bayar QRIS pesanan selesai yang sudah > 30 hari (tiap 24 jam)
+startProofCleanup()

@@ -1,6 +1,6 @@
 import { processMessage } from '../ai/agent.js'
-import { onOrderPaid } from '../payment/qris.js'
 import { sendReceipt } from '../receipt/receipt.js'
+import { getImageInfo, handlePaymentProof } from '../payment/proof.js'
 import { checkIncoming } from '../lib/rateLimiter.js'
 
 // ─── Gabungkan pesan beruntun ────────────────────────────────────────────────
@@ -34,14 +34,15 @@ export async function handleMessage(sock, msg, businessId, lidMap) {
     }
   }
 
-  // Extract teks pesan
-  const text = msg.message?.conversation
+  // Extract teks pesan (atau foto — mis. bukti bayar QRIS)
+  let text = msg.message?.conversation
     || msg.message?.extendedTextMessage?.text
     || ''
+  const image = text ? null : getImageInfo(msg)
 
-  if (!text) return
+  if (!text && !image) return
 
-  console.log(`📩 [${businessId}] Pesan dari ${customerWa}: ${text}`)
+  console.log(`📩 [${businessId}] Pesan dari ${customerWa}: ${text || `[gambar] ${image.caption}`}`)
 
   // Rate limit per menit (per pelanggan & per bisnis) — sebelum menyentuh AI / database
   const rl = checkIncoming(businessId, customerWa)
@@ -57,6 +58,20 @@ export async function handleMessage(sock, msg, businessId, lidMap) {
       } catch (e) { console.error('Gagal kirim notifikasi rate limit:', e?.message) }
     }
     return
+  }
+
+  // Foto dari pelanggan yang punya pesanan QRIS terbuka = bukti bayar (tidak lewat AI).
+  // Foto lain: caption-nya diproses seperti teks biasa, tanpa caption diabaikan.
+  if (image) {
+    try {
+      const botWa = sock.user.id.split(':')[0]
+      if (await handlePaymentProof(sock, msg, { businessId, jid, customerWa, botWa })) return
+    } catch (err) {
+      console.error(`❌ [${businessId}] Gagal memproses gambar dari ${customerWa}:`, err?.message || err)
+      return
+    }
+    text = image.caption.trim()
+    if (!text) return
   }
 
   // Tampung dulu; balas setelah pelanggan berhenti mengetik selama DEBOUNCE_MS
@@ -100,7 +115,7 @@ async function replyToCustomer(sock, jid, msg, text, businessId, customerWa) {
     await sock.sendPresenceUpdate('composing', jid)
 
     // Proses dengan AI
-    const { reply, receipt, ownerNotif, qris } = await processMessage(botWa, customerWa, text)
+    const { reply, receipt, ownerNotif, qris } = await processMessage(botWa, customerWa, text, jid)
 
     // Kirim balasan utama ke pelanggan
     await sock.sendMessage(jid, { text: reply }, { quoted: msg })
@@ -120,56 +135,14 @@ async function replyToCustomer(sock, jid, msg, text, businessId, customerWa) {
         hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta'
       })
       const caption = `💳 *PEMBAYARAN QRIS*\n\n` +
-        `Silakan scan QRIS di atas untuk membayar\n` +
         `💰 Total: *Rp ${qris.total.toLocaleString('id-ID')}*\n` +
         `⏰ Berlaku sampai *${expiryStr} WIB*\n\n` +
-        `_Setelah pembayaran diterima, kami akan otomatis konfirmasi via chat ini._ ✨`
+        `Setelah bayar, kirim *screenshot bukti pembayaran* di chat ini ya kak 🙏`
       await sock.sendMessage(jid, {
         image: qris.buffer,
         caption
       })
       console.log(`💳 [${businessId}] QRIS dikirim ke ${customerWa} untuk order ${qris.orderId.slice(0,8)}`)
-
-      // Register callback: pas order lunas, kirim struk + konfirmasi ke customer + notif owner
-      onOrderPaid(qris.orderId, async ({ order, paidAt }) => {
-        try {
-          const paidTime = new Date(paidAt).toLocaleTimeString('id-ID', {
-            hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta'
-          })
-          const shortId = qris.orderId.slice(0, 8).toUpperCase()
-
-          // 1. Notif konfirmasi ke customer
-          const customerNotif = `✅ *PEMBAYARAN DITERIMA*\n\n` +
-            `Terima kasih Kak ${qris.customerName}! 🙏\n\n` +
-            `📋 Order: *#${shortId}*\n` +
-            `💰 Nominal: *Rp ${qris.total.toLocaleString('id-ID')}*\n` +
-            `🕐 Waktu bayar: *${paidTime} WIB*\n\n` +
-            `Pesanan Kakak sedang kami siapkan & akan segera dikirim! 🚀`
-          await sock.sendMessage(jid, { text: customerNotif })
-          console.log(`💚 [${businessId}] Konfirmasi lunas dikirim ke ${customerWa}`)
-
-          // 2. Kirim struk digital ke customer (di-hold dari awal, sekarang baru dikirim)
-          if (qris.receipt) {
-            await new Promise(r => setTimeout(r, 800))
-            const kind = await sendReceipt(sock, jid, qris.receipt)
-            console.log(`🧾 [${businessId}] Struk ${kind === 'image' ? 'gambar' : 'teks'} (post-payment) dikirim ke ${customerWa}`)
-          }
-
-          // 3. Notif ke owner
-          await new Promise(r => setTimeout(r, 500))
-          const ownerJid = `${botWa}@s.whatsapp.net`
-          const ownerPaidNotif = `💰 *PEMBAYARAN MASUK!*\n\n` +
-            `📋 Order: *#${shortId}*\n` +
-            `👤 Pelanggan: ${qris.customerName}\n` +
-            `💵 Nominal: *Rp ${qris.total.toLocaleString('id-ID')}*\n` +
-            `🕐 Waktu: ${paidTime} WIB\n\n` +
-            `_Pembayaran diterima, order otomatis masuk ke DIPROSES. Segera siapkan barangnya!_ 📦`
-          await sock.sendMessage(ownerJid, { text: ownerPaidNotif })
-          console.log(`🔔 [${businessId}] Notif lunas ke owner ${botWa}`)
-        } catch (notifErr) {
-          console.error(`❌ Gagal kirim notif lunas:`, notifErr?.message)
-        }
-      })
     }
 
     // Kirim notifikasi ke owner (nomor bot sendiri)

@@ -3,8 +3,9 @@
 //
 // Alur:
 //   1. generateQrisForOrder() — bikin payload QRIS dummy + PNG buffer
-//   2. scheduleAutoConfirm() — timer auto-lunas setelah X detik (fake "customer bayar")
-//   3. Setelah lunas → supabase update + trigger callback (kirim notif WA)
+//   2. Pelanggan kirim foto bukti bayar → src/payment/proof.js (status "menunggu_verifikasi")
+//   3. Penjual Konfirmasi / Tolak di dashboard → POST /api/payment (src/api/server.js)
+//      Tidak ada konfirmasi otomatis: bukti bayar bisa dipalsukan.
 //
 // Catetan: payload di QR ini BUKAN QRIS real, cuma URL internal biar
 // kalau di-scan dari kamera HP bakal buka halaman konfirmasi (opsional Phase 2).
@@ -16,7 +17,6 @@ import sharp from 'sharp'
 import supabase from '../db/supabase.js'
 
 // Config
-const AUTO_CONFIRM_DELAY_MS = parseInt(process.env.QRIS_AUTO_CONFIRM_MS || '20000') // 20 detik
 const QRIS_EXPIRY_MINUTES = 15
 
 // ─── EMVCo QRIS payload builder (mock — cuma buat demo visual) ─────────
@@ -70,22 +70,6 @@ function buildQrisPayload({ merchantName, merchantCity, amount, referenceId }) {
 }
 
 
-// Registry callback saat pembayaran lunas
-// (di-set dari agentManager saat session dibuat)
-const paidCallbacks = new Map() // orderId → { callback: async fn({ businessId, order, paidAt }), timer }
-
-// Callback dibuang otomatis setelah QRIS kedaluwarsa (+5 menit), supaya pesanan yang tidak
-// dibayar tidak menumpuk di memori (callback ikut memegang gambar QRIS & data struk).
-const PAID_CALLBACK_TTL_MS = (QRIS_EXPIRY_MINUTES + 5) * 60 * 1000
-
-export function onOrderPaid(orderId, callback) {
-  const prev = paidCallbacks.get(orderId)
-  if (prev) clearTimeout(prev.timer)
-  const timer = setTimeout(() => paidCallbacks.delete(orderId), PAID_CALLBACK_TTL_MS)
-  timer.unref?.()
-  paidCallbacks.set(orderId, { callback, timer })
-}
-
 /**
  * Generate QRIS untuk 1 order.
  * @param {object} params
@@ -136,63 +120,6 @@ export async function generateQrisForOrder({ orderId, businessId, businessName, 
   return { qrisBuffer, qrisPayload: payload, expiresAt }
 }
 
-
-/**
- * Schedule auto-confirm (demo mode). Setelah delay, order status → lunas.
- * Callback dipanggil (kalau ada) buat kirim notif WA.
- */
-export function scheduleAutoConfirm({ orderId, businessId, delayMs = AUTO_CONFIRM_DELAY_MS }) {
-  console.log(`⏱️ [DEMO] Order ${orderId.slice(0,8)} akan auto-lunas dalam ${delayMs/1000}s...`)
-
-  setTimeout(async () => {
-    try {
-      // Cek: masih menunggu? jangan override kalau udah dibatalkan/dll
-      const { data: current } = await supabase.from('orders')
-        .select('id, status, total, customer_name, customer_address, items, business_id')
-        .eq('id', orderId).single()
-
-      if (!current) {
-        console.log(`⏱️ [DEMO] Order ${orderId.slice(0,8)} sudah tidak ada, skip.`)
-        return
-      }
-
-      if (current.status !== 'menunggu') {
-        console.log(`⏱️ [DEMO] Order ${orderId.slice(0,8)} status = ${current.status}, skip auto-confirm.`)
-        return
-      }
-
-      // Update: setelah bayar QRIS, status pindah ke "diproses"
-      // (bukan langsung "lunas/selesai" — barang belum dikirim!)
-      // paid_at tetep ke-record supaya keliatan udah dibayar
-      const paidAt = new Date().toISOString()
-      const { error } = await supabase.from('orders').update({
-        status: 'diproses',
-        paid_at: paidAt
-      }).eq('id', orderId)
-
-      if (error) {
-        console.error(`❌ Auto-confirm gagal untuk ${orderId.slice(0,8)}:`, error)
-        return
-      }
-
-      console.log(`✅ [DEMO] Order ${orderId.slice(0,8)} auto-lunas!`)
-
-      // Trigger callback (kirim notif WA)
-      const entry = paidCallbacks.get(orderId)
-      if (entry) {
-        clearTimeout(entry.timer)
-        paidCallbacks.delete(orderId)
-        try {
-          await entry.callback({ businessId, order: current, paidAt })
-        } catch (cbErr) {
-          console.error('❌ Payment callback error:', cbErr)
-        }
-      }
-    } catch (err) {
-      console.error(`❌ Auto-confirm exception ${orderId}:`, err)
-    }
-  }, delayMs)
-}
 
 // ─── Compose kartu QRIS-style (SVG overlay via sharp) ────────────────
 // Layout: header merah "QRIS" + garis putih tipis + QR (520px) + footer info.
