@@ -75,38 +75,6 @@ async function saveComplaint(businessId, customerWa, customerName, category, des
   else console.log(`🚨 Komplain disimpan dari ${customerWa}: ${category}`)
 }
 
-function buildReceipt(businessName, orderId, items, total, customerName, customerAddress) {
-  const shortId = orderId ? orderId.slice(0, 8).toUpperCase() : '--------'
-  const now = new Date().toLocaleString('id-ID', {
-    day: 'numeric', month: 'long', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta'
-  })
-
-  const itemLines = items.map(item => {
-    const subtotal = (item.qty || 1) * (item.price || 0)
-    return `• ${item.name} ${item.qty}x  @Rp ${(item.price || 0).toLocaleString('id-ID')}  =  Rp ${subtotal.toLocaleString('id-ID')}`
-  }).join('\n')
-
-  return `━━━━━━━━━━━━━━━━━━━
-🧾 *STRUK PESANAN*
-━━━━━━━━━━━━━━━━━━━
-📋 No. Order: *#${shortId}*
-📅 ${now} WIB
-
-👤 *Nama:* ${customerName}
-📍 *Alamat:* ${customerAddress}
-
-📦 *Detail Pesanan:*
-${itemLines}
-
-━━━━━━━━━━━━━━━━━━━
-💰 *TOTAL: Rp ${total.toLocaleString('id-ID')}*
-━━━━━━━━━━━━━━━━━━━
-
-🙏 Terima kasih sudah order di *${businessName}*!
-Pesanan Kak ${customerName} segera kami proses! 🚀`
-}
-
 const MAX_QTY_PER_ITEM = 100
 const MAX_ITEMS_PER_ORDER = 20
 
@@ -453,7 +421,19 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
       const paymentMethod = (order.payment_method || 'qris').toLowerCase() === 'cod' ? 'cod' : 'qris'
 
       const orderId = await saveOrder(business.id, customerWa, order.items, order.total, order.customer_name, order.customer_address, paymentMethod)
-      receipt = buildReceipt(business.business_name, orderId, order.items, order.total, order.customer_name, order.customer_address)
+      // Data struk — dikirim sebagai gambar oleh handler (src/receipt/receipt.js)
+      receipt = {
+        businessName: business.business_name,
+        businessAddress: business.address,
+        businessWa: business.wa_number,
+        orderId,
+        createdAt: new Date().toISOString(),
+        items: order.items,
+        total: order.total,
+        customerName: order.customer_name,
+        customerAddress: order.customer_address,
+        paymentMethod,
+      }
 
       const itemSummary = order.items.map(i => `• ${i.name} x${i.qty}`).join('\n')
       const paymentLabel = paymentMethod === 'qris' ? '💳 QRIS' : '💵 COD (tunai)'

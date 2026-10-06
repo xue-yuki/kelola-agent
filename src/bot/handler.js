@@ -1,5 +1,6 @@
 import { processMessage } from '../ai/agent.js'
 import { onOrderPaid } from '../payment/qris.js'
+import { sendReceipt } from '../receipt/receipt.js'
 import { checkIncoming } from '../lib/rateLimiter.js'
 
 // ─── Gabungkan pesan beruntun ────────────────────────────────────────────────
@@ -105,11 +106,11 @@ async function replyToCustomer(sock, jid, msg, text, businessId, customerWa) {
     await sock.sendMessage(jid, { text: reply }, { quoted: msg })
     console.log(`✅ [${businessId}] Balas ke ${customerWa}: ${reply.substring(0, 50)}...`)
 
-    // Kirim struk digital ke pelanggan jika ada order
+    // Kirim struk (gambar + caption; cadangan teks) ke pelanggan jika ada order COD
     if (receipt) {
       await new Promise(r => setTimeout(r, 1500))
-      await sock.sendMessage(jid, { text: receipt })
-      console.log(`🧾 [${businessId}] Struk dikirim ke ${customerWa}`)
+      const kind = await sendReceipt(sock, jid, receipt)
+      console.log(`🧾 [${businessId}] Struk (${kind === 'image' ? 'gambar' : 'teks'}) dikirim ke ${customerWa}`)
     }
 
     // Kirim QRIS payment (kalau ada order & QRIS berhasil di-generate)
@@ -150,8 +151,8 @@ async function replyToCustomer(sock, jid, msg, text, businessId, customerWa) {
           // 2. Kirim struk digital ke customer (di-hold dari awal, sekarang baru dikirim)
           if (qris.receipt) {
             await new Promise(r => setTimeout(r, 800))
-            await sock.sendMessage(jid, { text: qris.receipt })
-            console.log(`🧾 [${businessId}] Struk (post-payment) dikirim ke ${customerWa}`)
+            const kind = await sendReceipt(sock, jid, qris.receipt)
+            console.log(`🧾 [${businessId}] Struk ${kind === 'image' ? 'gambar' : 'teks'} (post-payment) dikirim ke ${customerWa}`)
           }
 
           // 3. Notif ke owner
