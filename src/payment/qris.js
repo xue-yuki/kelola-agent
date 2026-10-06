@@ -72,10 +72,18 @@ function buildQrisPayload({ merchantName, merchantCity, amount, referenceId }) {
 
 // Registry callback saat pembayaran lunas
 // (di-set dari agentManager saat session dibuat)
-const paidCallbacks = new Map() // orderId → async fn({ businessId, order })
+const paidCallbacks = new Map() // orderId → { callback: async fn({ businessId, order, paidAt }), timer }
+
+// Callback dibuang otomatis setelah QRIS kedaluwarsa (+5 menit), supaya pesanan yang tidak
+// dibayar tidak menumpuk di memori (callback ikut memegang gambar QRIS & data struk).
+const PAID_CALLBACK_TTL_MS = (QRIS_EXPIRY_MINUTES + 5) * 60 * 1000
 
 export function onOrderPaid(orderId, callback) {
-  paidCallbacks.set(orderId, callback)
+  const prev = paidCallbacks.get(orderId)
+  if (prev) clearTimeout(prev.timer)
+  const timer = setTimeout(() => paidCallbacks.delete(orderId), PAID_CALLBACK_TTL_MS)
+  timer.unref?.()
+  paidCallbacks.set(orderId, { callback, timer })
 }
 
 /**
@@ -170,14 +178,14 @@ export function scheduleAutoConfirm({ orderId, businessId, delayMs = AUTO_CONFIR
       console.log(`✅ [DEMO] Order ${orderId.slice(0,8)} auto-lunas!`)
 
       // Trigger callback (kirim notif WA)
-      const cb = paidCallbacks.get(orderId)
-      if (cb) {
+      const entry = paidCallbacks.get(orderId)
+      if (entry) {
+        clearTimeout(entry.timer)
+        paidCallbacks.delete(orderId)
         try {
-          await cb({ businessId, order: current, paidAt })
+          await entry.callback({ businessId, order: current, paidAt })
         } catch (cbErr) {
           console.error('❌ Payment callback error:', cbErr)
-        } finally {
-          paidCallbacks.delete(orderId)
         }
       }
     } catch (err) {
