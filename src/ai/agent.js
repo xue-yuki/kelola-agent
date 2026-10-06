@@ -231,46 +231,17 @@ async function saveOrder(businessId, customerWa, items, total, customerName, cus
   return savedOrder?.id || null
 }
 
-export async function processMessage(waNumber, customerWa, customerMessage, customerJid, { closedUntilText = null } = {}) {
-  const context = await getBusinessContext(waNumber)
-  if (!context) return { reply: 'Maaf, bisnis ini belum terdaftar di Kelola.ai.', receipt: null }
-
-  const { business, products } = context
-
-  // Kuota chat bulanan dari paket langganan (cek + tambah atomik di database).
-  // Gagal cek (DB error) => lolos (fail-open) supaya bot tidak mati karena gangguan DB.
-  let quotaPrefix = ''
-  try {
-    const { data: usage, error: quotaErr } = await supabase.rpc('consume_wa_chat', { p_business_id: business.id })
-    const row = Array.isArray(usage) ? usage[0] : usage
-    if (quotaErr || !row) {
-      console.error('⚠️ Gagal cek kuota chat, lanjut tanpa pembatasan:', quotaErr?.message)
-    } else if (!row.allowed) {
-      console.warn(`⛔ [${business.id}] Kuota chat bulanan habis (${row.used}/${row.quota})`)
-      return { reply: '⛔ Maaf, layanan AI untuk toko ini sedang dijeda karena kuota pesan bulanan sudah habis. Mohon hubungi pemilik toko langsung ya, Kak 🙏', receipt: null }
-    } else if (row.quota > 0) {
-      const warnAt = Math.ceil(row.quota * 0.8)
-      if (row.used === warnAt) {
-        quotaPrefix = `⚠️ *Kuota chat AI hampir habis:* ${row.used}/${row.quota} bulan ini. Upgrade paket supaya bot tetap membalas pelanggan.\n\n`
-      } else if (row.used === row.quota) {
-        quotaPrefix = `⛔ *Kuota chat AI bulan ini habis* (${row.used}/${row.quota}). Pesan berikutnya tidak akan dibalas AI sampai kuota direset atau paket di-upgrade.\n\n`
-      }
-    }
-  } catch (quotaException) {
-    console.error('⚠️ Error saat cek kuota chat, lanjut:', quotaException?.message)
-  }
-
-  const history = await getConversationHistory(business.id, customerWa)
-
+// Prompt sistem bot — dipakai bersama oleh processMessage (pelanggan asli) dan
+// src/ai/playground.js (uji coba di dashboard), supaya hasil uji sama dengan yang diterima pelanggan.
+export function buildSystemPrompt(business, products, settings, { closedUntilText = null } = {}) {
   // QRIS hanya ditawarkan kalau penjual sudah upload QRIS toko (dashboard → Pengaturan → Pembayaran)
   const hasQris = isValidQris(business.qris_payload)
 
   // Persona & gaya dari halaman Asisten AI (bot_settings) + instruksi bebas pemilik (ai_instructions)
-  const settings = await getBotSettings(business.id)
   const greeting = (settings.greeting || 'Kak').trim()
   const assistantName = (settings.assistant_name || '').trim()
   const persona = `Kamu adalah ${assistantName ? `${assistantName}, asisten` : 'asisten'} WhatsApp untuk ${business.business_name}.
-Panggil customer dengan sapaan "${greeting}". Contoh-contoh kalimat di bawah memakai "kak" — selalu ganti dengan sapaan "${greeting}".
+Panggil customer dengan sapaan "${greeting}". Contoh-contoh kalimat di bawah memakai "kak", selalu ganti dengan sapaan "${greeting}".
 ${REPLY_STYLES[settings.reply_style] || REPLY_STYLES.natural}
 Tulis seperti orang mengetik di WhatsApp: JANGAN pakai tanda pisah panjang (—), pakai koma atau titik.
 Bantu customer tanya produk dan proses pesanan.${business.ai_instructions ? `
@@ -364,14 +335,11 @@ Tambahkan tag <CALL_OWNER> di akhir pesan.
 Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya. Ditunggu sebentar! 🙏 <CALL_OWNER>"
 `
 
-  const messages = [
-    ...history.map(h => ({
-      role: h.role,
-      content: h.message
-    })),
-    { role: 'user', content: customerMessage }
-  ]
+  return systemPrompt
+}
 
+// Panggil model AI (OpenAI-compatible: 9Router / Gemini). Dipakai juga oleh src/ai/playground.js.
+export async function callAI(systemPrompt, messages) {
   const response = await fetch(process.env.AI_PAAS_URL || 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
     method: 'POST',
     headers: {
@@ -390,15 +358,65 @@ Contoh balasan: "Baik Kak, pesanannya saya sampaikan langsung ke pemilik toko ya
     })
   })
 
-  const data = await response.json()
+  const data = await response.json().catch(() => ({}))
 
   // Cek jika API return error
   if (!response.ok || !data.choices?.[0]?.message?.content) {
     console.error('❌ AI-PaaS API error:', JSON.stringify(data))
-    return { reply: 'Maaf, AI sedang tidak bisa dihubungi saat ini. Coba lagi sebentar ya! 🙏', receipt: null }
+    return { ok: false }
+  }
+  return { ok: true, reply: data.choices[0].message.content }
+}
+
+export async function processMessage(waNumber, customerWa, customerMessage, customerJid, { closedUntilText = null } = {}) {
+  const context = await getBusinessContext(waNumber)
+  if (!context) return { reply: 'Maaf, bisnis ini belum terdaftar di Kelola.ai.', receipt: null }
+
+  const { business, products } = context
+
+  // Kuota chat bulanan dari paket langganan (cek + tambah atomik di database).
+  // Gagal cek (DB error) => lolos (fail-open) supaya bot tidak mati karena gangguan DB.
+  let quotaPrefix = ''
+  try {
+    const { data: usage, error: quotaErr } = await supabase.rpc('consume_wa_chat', { p_business_id: business.id })
+    const row = Array.isArray(usage) ? usage[0] : usage
+    if (quotaErr || !row) {
+      console.error('⚠️ Gagal cek kuota chat, lanjut tanpa pembatasan:', quotaErr?.message)
+    } else if (!row.allowed) {
+      console.warn(`⛔ [${business.id}] Kuota chat bulanan habis (${row.used}/${row.quota})`)
+      return { reply: '⛔ Maaf, layanan AI untuk toko ini sedang dijeda karena kuota pesan bulanan sudah habis. Mohon hubungi pemilik toko langsung ya, Kak 🙏', receipt: null }
+    } else if (row.quota > 0) {
+      const warnAt = Math.ceil(row.quota * 0.8)
+      if (row.used === warnAt) {
+        quotaPrefix = `⚠️ *Kuota chat AI hampir habis:* ${row.used}/${row.quota} bulan ini. Upgrade paket supaya bot tetap membalas pelanggan.\n\n`
+      } else if (row.used === row.quota) {
+        quotaPrefix = `⛔ *Kuota chat AI bulan ini habis* (${row.used}/${row.quota}). Pesan berikutnya tidak akan dibalas AI sampai kuota direset atau paket di-upgrade.\n\n`
+      }
+    }
+  } catch (quotaException) {
+    console.error('⚠️ Error saat cek kuota chat, lanjut:', quotaException?.message)
   }
 
-  const reply = data.choices[0].message.content
+  const history = await getConversationHistory(business.id, customerWa)
+
+  const settings = await getBotSettings(business.id)
+  // QRIS hanya ditawarkan kalau penjual sudah upload QRIS toko (dashboard → Pengaturan → Pembayaran)
+  const hasQris = isValidQris(business.qris_payload)
+  const systemPrompt = buildSystemPrompt(business, products, settings, { closedUntilText })
+
+  const messages = [
+    ...history.map(h => ({
+      role: h.role,
+      content: h.message
+    })),
+    { role: 'user', content: customerMessage }
+  ]
+
+  const ai = await callAI(systemPrompt, messages)
+  if (!ai.ok) {
+    return { reply: 'Maaf, AI sedang tidak bisa dihubungi saat ini. Coba lagi sebentar ya! 🙏', receipt: null }
+  }
+  const reply = ai.reply
 
   // Debug: log raw AI response
   console.log('🤖 Raw AI response:', reply.substring(0, 500))

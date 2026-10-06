@@ -10,6 +10,7 @@ import {
   destroySession,
 } from '../bot/agentManager.js'
 import { decidePayment } from '../payment/proof.js'
+import { playgroundReply } from '../ai/playground.js'
 
 dotenv.config()
 
@@ -257,6 +258,21 @@ app.post('/api/payment/:businessId', limitPayment, async (req, res) => {
   } catch (err) {
     console.error(`❌ [${businessId}] /api/payment gagal:`, err?.message || err)
     res.status(500).json({ error: 'Gagal memproses pembayaran' })
+  }
+})
+
+// ─── Uji coba chat (pratinjau di halaman Asisten AI) ─────────────────────────
+// Dashboard → agent-proxy (cek login & kepemilikan) → /api/playground/:businessId
+// Body: { messages, settings, instructions, closedTest }. Lihat src/ai/playground.js.
+app.post('/api/playground/:businessId', async (req, res) => {
+  const { businessId } = req.params
+  const { messages, settings, instructions, closedTest } = req.body || {}
+  try {
+    const { status, body } = await playgroundReply({ businessId, messages, settings, instructions, closedTest: !!closedTest })
+    res.status(status).json(body)
+  } catch (err) {
+    console.error(`❌ [${businessId}] /api/playground gagal:`, err?.message || err)
+    res.status(500).json({ error: 'Uji coba gagal. Coba lagi.' })
   }
 })
 
