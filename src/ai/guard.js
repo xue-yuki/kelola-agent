@@ -39,6 +39,24 @@ export function leaksPrompt(reply) {
   return WEAK_MARKERS.filter((m) => up.includes(m)).length >= 2
 }
 
+// Bot toko hanya membalas teks chat biasa. Kode program / HTML / tabel markdown = bot sedang dipakai
+// untuk hal lain (contoh nyata 6 Okt: "price list dalam python", lalu "format html + css").
+const CODE_PATTERNS = [
+  /```/,
+  /<!DOCTYPE|<\s*\/?\s*(html|head|body|style|script|div|span|table|tr|td|th|ul|li|p|h[1-6])\b[^>]*>/i,
+  /^\s*(def |class \w+[:(]|import \w|from \S+ import |function\s*\w*\s*\(|(const|let|var) \w+\s*=|print\(|console\.log\(|#include\b|public static )/m,
+  /^\s*\|.*\|\s*\n\s*\|?\s*:?-{3,}/m, // tabel markdown
+]
+
+export function looksLikeCode(reply) {
+  const text = String(reply ?? '').replace(/<(ORDER|CANCEL_ORDER|COMPLAINT|CUSTOMER)>.*?<\/\1>/gs, '')
+  return CODE_PATTERNS.some((re) => re.test(text))
+}
+
+export function noCodeReply(greeting = 'Kak') {
+  return `Maaf ${greeting}, aku nggak bisa bikin kode atau file ya 🙏 Kalau mau lihat daftar harga, aku tuliskan langsung di chat aja. Mau?`
+}
+
 export function safeReply(businessName, greeting = 'Kak') {
   return `Maaf ${greeting}, aku cuma bisa bantu soal produk dan pesanan di ${businessName || 'toko ini'} ya 🙏 Ada yang mau dipesan?`
 }
