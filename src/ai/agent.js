@@ -2,6 +2,7 @@ import dotenv from 'dotenv'
 import supabase from '../db/supabase.js'
 import { generateQrisForOrder, isValidQris } from '../payment/qris.js'
 import { getBotSettings } from '../bot/settings.js'
+import { canCustomerCancel, cancelByCustomer, findCustomerOrder, getOpenOrders, handleCancelTag, heldStock, openOrdersPrompt, requestChange, shortId } from '../order/customerCancel.js'
 
 dotenv.config()
 
@@ -102,7 +103,8 @@ function normName(value) {
 
 // Harga, nama produk, dan total TIDAK dipercaya dari output AI:
 // semuanya dihitung ulang dari tabel products milik bisnis ini.
-async function validateOrder(businessId, order) {
+// held: stok yang masih dipegang pesanan lama yang akan diganti (product_id → qty), lihat "replaces"
+async function validateOrder(businessId, order, held = null) {
   const reject = (reason, message) => ({ ok: false, reason, message })
   const askAgain = 'Maaf Kak, pesanannya belum bisa kami proses karena ada item yang tidak ada di katalog atau stoknya tidak cukup. Boleh sebutkan lagi pesanannya ya? 🙏'
 
@@ -134,7 +136,7 @@ async function validateOrder(businessId, order) {
     if (!Number.isFinite(Number(product.price)) || Number(product.price) < 0) {
       return reject(`harga produk tidak valid: ${product.name}`, askAgain)
     }
-    if ((product.stock ?? 0) < qty) return reject(`stok tidak cukup: ${product.name}`, askAgain)
+    if ((product.stock ?? 0) + (held?.get(product.id) ?? 0) < qty) return reject(`stok tidak cukup: ${product.name}`, askAgain)
 
     const existing = items.find(i => i.product_id === product.id)
     if (existing) {
@@ -233,7 +235,7 @@ async function saveOrder(businessId, customerWa, items, total, customerName, cus
 
 // Prompt sistem bot — dipakai bersama oleh processMessage (pelanggan asli) dan
 // src/ai/playground.js (uji coba di dashboard), supaya hasil uji sama dengan yang diterima pelanggan.
-export function buildSystemPrompt(business, products, settings, { closedUntilText = null } = {}) {
+export function buildSystemPrompt(business, products, settings, { closedUntilText = null, openOrders = [] } = {}) {
   // QRIS hanya ditawarkan kalau penjual sudah upload QRIS toko (dashboard → Pengaturan → Pembayaran)
   const hasQris = isValidQris(business.qris_payload)
 
@@ -312,6 +314,18 @@ LALU di AKHIR PESAN (SETELAH teks rincian), tambahkan tag ORDER untuk sistem:
 Field payment_method WAJIB diisi, nilainya HARUS ${hasQris ? '"qris" atau "cod"' : '"cod"'} (huruf kecil).
 
 Tag ORDER HARUS di paling akhir pesan, JANGAN di tengah!
+
+PESANAN PELANGGAN INI YANG BELUM SELESAI (data sistem):
+${openOrdersPrompt(openOrders)}
+
+PEMBATALAN & PERUBAHAN PESANAN (hanya untuk pesanan di daftar atas):
+- Customer ingin MEMBATALKAN: tanyakan konfirmasi dulu sambil menyebut nomor, isi, dan total pesanannya. Setelah customer jelas setuju (misalnya "iya", "jadi batal"), balas singkat lalu tulis di akhir pesan: <CANCEL_ORDER>{"order":"4F2A9C1D","reason":"alasan singkat dari customer, kosongkan jika tidak ada"}</CANCEL_ORDER>
+- JANGAN pernah bilang pesanan sudah dibatalkan atau sudah diubah. Sistem yang memeriksa lalu mengabari hasilnya ke customer.
+- Customer SALAH PESAN atau ingin MENGUBAH pesanan (ganti jumlah, tambah/kurangi/ganti barang, ganti alamat atau cara bayar): ikuti alur pesanan biasa dengan rincian BARU yang lengkap (semua barang final, bukan hanya tambahannya), lalu di tag ORDER tambahkan field "replaces" berisi nomor pesanan lama, contoh: "replaces":"4F2A9C1D".
+- Customer memesan LAGI pesanan terpisah: JANGAN isi "replaces". Kalau ragu, tanyakan dulu: "Mau ditambahkan ke pesanan sebelumnya atau jadi pesanan baru, kak?"
+- Pesanan yang sudah Diproses/Dikirim tetap pakai cara di atas; sistem akan meneruskannya ke penjual.
+- Customer yang salah pesan sendiri BUKAN komplain. Komplain "Salah item / kuantitas" hanya untuk barang dari toko yang tidak sesuai pesanan.
+- Kalau daftar pesanan di atas "(tidak ada)", jangan pakai CANCEL_ORDER atau "replaces".
 
 DETEKSI KOMPLAIN:
 Jika customer menyampaikan keluhan/komplain (produk rusak, pesanan tidak sampai, salah item, dll), balas dengan empati seperti biasa, lalu tambahkan tag COMPLAINT di paling akhir pesan (HANYA di pesan pertama yang mendeteksi komplain, JANGAN ulangi di pesan-pesan berikutnya).
@@ -402,7 +416,10 @@ export async function processMessage(waNumber, customerWa, customerMessage, cust
   const settings = await getBotSettings(business.id)
   // QRIS hanya ditawarkan kalau penjual sudah upload QRIS toko (dashboard → Pengaturan → Pembayaran)
   const hasQris = isValidQris(business.qris_payload)
-  const systemPrompt = buildSystemPrompt(business, products, settings, { closedUntilText })
+  // Pesanan pelanggan yang belum selesai: untuk batal/ubah lewat chat (src/order/customerCancel.js)
+  const openOrders = await getOpenOrders(business.id, customerWa, customerJid)
+  const greeting = (settings.greeting || 'Kak').trim()
+  const systemPrompt = buildSystemPrompt(business, products, settings, { closedUntilText, openOrders })
 
   const messages = [
     ...history.map(h => ({
@@ -442,6 +459,17 @@ export async function processMessage(waNumber, customerWa, customerMessage, cust
   let receipt = null
   let ownerNotif = quotaPrefix ? quotaPrefix.trim() : null
 
+  // Pelanggan membatalkan pesanan (AI hanya mengusulkan; server & database yang memutuskan)
+  const cancelMatch = reply.match(/<CANCEL_ORDER>(.*?)<\/CANCEL_ORDER>/s)
+  if (cancelMatch) {
+    const result = await handleCancelTag({ raw: cancelMatch[1], openOrders, greeting })
+    return {
+      reply: result.reply,
+      receipt: null,
+      ownerNotif: result.ownerNotif ? quotaPrefix + result.ownerNotif : (quotaPrefix ? quotaPrefix.trim() : null),
+    }
+  }
+
   const orderMatch = reply.match(/<ORDER>(.*?)<\/ORDER>/s)
   if (orderMatch) {
     try {
@@ -449,7 +477,15 @@ export async function processMessage(waNumber, customerWa, customerMessage, cust
       rawJson = rawJson.replace(/^```json\s*/, '').replace(/```$/, '').trim()
       const parsed = JSON.parse(rawJson)
 
-      const checked = await validateOrder(business.id, parsed)
+      // Mengubah pesanan lama ("replaces"): hanya pesanan aktif milik pelanggan ini. Yang sudah
+      // diproses/dibayar tidak diganti otomatis, tapi diteruskan ke penjual.
+      const replacing = parsed.replaces ? findCustomerOrder(openOrders, parsed.replaces) : null
+      if (replacing && !canCustomerCancel(replacing)) {
+        const forwarded = await requestChange({ order: replacing, newItems: parsed.items, greeting, code: replacing.status === 'menunggu' ? 'paid' : 'processed' })
+        return { reply: forwarded.reply, receipt: null, ownerNotif: quotaPrefix + forwarded.ownerNotif }
+      }
+
+      const checked = await validateOrder(business.id, parsed, replacing ? heldStock(replacing) : null)
       if (!checked.ok) {
         console.warn(`🚫 [${business.id}] Order ditolak validasi (${checked.reason}) dari ${customerWa}`)
         return { reply: checked.message, receipt: null, ownerNotif: quotaPrefix ? quotaPrefix.trim() : null }
@@ -475,6 +511,15 @@ export async function processMessage(waNumber, customerWa, customerMessage, cust
         }
       }
 
+      // Batalkan pesanan lama dulu (stok kembali). Kalau baru saja diproses penjual → teruskan ke penjual.
+      if (replacing) {
+        const cancelled = await cancelByCustomer(replacing.id, 'Diubah pelanggan')
+        if (!cancelled.ok && cancelled.code !== 'already_cancelled') {
+          const forwarded = await requestChange({ order: replacing, newItems: order.items, greeting, code: cancelled.code })
+          return { reply: forwarded.reply, receipt: null, ownerNotif: quotaPrefix + forwarded.ownerNotif }
+        }
+      }
+
       const orderId = await saveOrder(business.id, customerWa, order.items, order.total, order.customer_name, order.customer_address, paymentMethod, customerJid)
       // Data struk — dikirim sebagai gambar oleh handler (src/receipt/receipt.js)
       receipt = {
@@ -492,7 +537,9 @@ export async function processMessage(waNumber, customerWa, customerMessage, cust
 
       const itemSummary = order.items.map(i => `• ${i.name} x${i.qty}`).join('\n')
       const paymentLabel = paymentMethod === 'qris' ? '💳 QRIS' : '💵 COD (tunai)'
-      ownerNotif = quotaPrefix + `🛒 *PESANAN BARU MASUK!*\n\n` +
+      ownerNotif = quotaPrefix + (replacing
+        ? `✏️ *PESANAN DIUBAH PELANGGAN*\n_Menggantikan #${shortId(replacing.id)} (dibatalkan otomatis, stok dikembalikan)_\n\n`
+        : `🛒 *PESANAN BARU MASUK!*\n\n`) +
         `👤 *Pelanggan:* ${order.customer_name}\n` +
         `📍 *Alamat:* ${order.customer_address}\n` +
         `💰 *Total:* Rp ${order.total.toLocaleString('id-ID')}\n` +
@@ -504,7 +551,8 @@ export async function processMessage(waNumber, customerWa, customerMessage, cust
         .replace(/<ORDER>.*?<\/ORDER>/s, '')
         .replace(/<COMPLAINT>.*?<\/COMPLAINT>/s, '')
         .replace(/<CALL_OWNER>/g, '')
-        .trim()
+        .trim() +
+        (replacing ? `\n\n_Pesanan sebelumnya #${shortId(replacing.id)} sudah dibatalkan dan diganti dengan pesanan ini._` : '')
 
       // ─── Branch berdasarkan metode pembayaran ────────────────────────
       if (paymentMethod === 'qris') {

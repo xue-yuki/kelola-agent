@@ -108,9 +108,11 @@ export async function playgroundReply({ businessId, messages, settings: override
   const notes = []
   if (/<ORDER>/.test(ai.reply)) notes.push('📦 Di chat asli, pesanan dibuat di sini lalu QRIS atau struk dikirim. Mode uji tidak membuat pesanan.')
   if (/<COMPLAINT>/.test(ai.reply)) notes.push('🚨 Di chat asli, komplain dicatat dan pemilik dikabari.')
+  if (/<CANCEL_ORDER>/.test(ai.reply)) notes.push('🚫 Di chat asli, pesanan yang masih Menunggu langsung dibatalkan (stok kembali); yang sudah diproses diteruskan ke penjual. Mode uji tidak membatalkan apa pun.')
   if (ai.reply.includes('<CALL_OWNER>')) notes.push('📞 Di chat asli, pemilik dikabari untuk membalas langsung.')
   const reply = ai.reply
     .replace(/<ORDER>.*?<\/ORDER>/s, '')
+    .replace(/<CANCEL_ORDER>.*?<\/CANCEL_ORDER>/s, '')
     .replace(/<COMPLAINT>.*?<\/COMPLAINT>/s, '')
     .replace(/<CALL_OWNER>/g, '')
     .trim()
