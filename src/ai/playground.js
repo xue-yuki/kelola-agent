@@ -113,6 +113,7 @@ export async function playgroundReply({ businessId, messages, settings: override
   const reply = ai.reply
     .replace(/<ORDER>.*?<\/ORDER>/s, '')
     .replace(/<CANCEL_ORDER>.*?<\/CANCEL_ORDER>/s, '')
+    .replace(/<CUSTOMER>.*?<\/CUSTOMER>/gs, '')
     .replace(/<COMPLAINT>.*?<\/COMPLAINT>/s, '')
     .replace(/<CALL_OWNER>/g, '')
     .trim()
