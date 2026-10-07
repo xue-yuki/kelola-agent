@@ -10,6 +10,7 @@ import {
   destroySession,
 } from '../bot/agentManager.js'
 import { decidePayment } from '../payment/proof.js'
+import { notifyOrderCancelled } from '../order/cancelNotice.js'
 import { playgroundReply } from '../ai/playground.js'
 
 dotenv.config()
@@ -258,6 +259,22 @@ app.post('/api/payment/:businessId', limitPayment, async (req, res) => {
   } catch (err) {
     console.error(`❌ [${businessId}] /api/payment gagal:`, err?.message || err)
     res.status(500).json({ error: 'Gagal memproses pembayaran' })
+  }
+})
+
+// ─── Kabari pelanggan: pesanan dibatalkan penjual ────────────────────────────
+// Dashboard → rpc cancel_order (status + stok) → agent-proxy (cek login & kepemilikan) → di sini.
+// Body: { orderId }. Lihat src/order/cancelNotice.js.
+app.post('/api/order-cancel/:businessId', limitPayment, async (req, res) => {
+  const { businessId } = req.params
+  const { orderId } = req.body || {}
+  if (typeof orderId !== 'string') return res.status(400).json({ error: 'orderId wajib diisi' })
+  try {
+    const { status, body } = await notifyOrderCancelled({ businessId, orderId, session: getSession(businessId) })
+    res.status(status).json(body)
+  } catch (err) {
+    console.error(`❌ [${businessId}] /api/order-cancel gagal:`, err?.message || err)
+    res.status(500).json({ error: 'Gagal mengabari pelanggan' })
   }
 })
 
