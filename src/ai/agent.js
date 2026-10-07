@@ -76,7 +76,7 @@ async function saveComplaint(businessId, customerWa, customerName, category, des
   else console.log(`🚨 Komplain disimpan dari ${customerWa}: ${category}`)
 }
 
-// Teks gaya balasan (pilihan di halaman Asisten AI)
+// Teks gaya balasan (pilihan di halaman Bot WhatsApp)
 const REPLY_STYLES = {
   singkat: 'Gaya balasan: SINGKAT dan langsung ke inti, maksimal 2-3 kalimat per balasan, tanpa basa-basi panjang, emoji seperlunya.',
   natural: 'Gaya balasan: santai dan ramah seperti admin toko yang akrab, bahasa sehari-hari, boleh emoji secukupnya.',
@@ -237,7 +237,7 @@ export function buildSystemPrompt(business, products, settings, { closedUntilTex
   // QRIS hanya ditawarkan kalau penjual sudah upload QRIS toko (dashboard → Pengaturan → Pembayaran)
   const hasQris = isValidQris(business.qris_payload)
 
-  // Persona & gaya dari halaman Asisten AI (bot_settings) + instruksi bebas pemilik (ai_instructions)
+  // Persona & gaya dari halaman Bot WhatsApp (bot_settings) + instruksi bebas pemilik (ai_instructions)
   const greeting = (settings.greeting || 'Kak').trim()
   const assistantName = (settings.assistant_name || '').trim()
   const persona = `Kamu adalah ${assistantName ? `${assistantName}, asisten` : 'asisten'} WhatsApp untuk ${business.business_name}.

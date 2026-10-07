@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────
-// Uji coba chat (pratinjau WhatsApp di halaman Asisten AI)
+// Uji coba chat (pratinjau WhatsApp di halaman Bot WhatsApp)
 //
 // Memakai prompt yang sama dengan bot asli (buildSystemPrompt) dengan pengaturan yang sedang
 // diatur di dashboard, walau belum disimpan. Tidak menyimpan percakapan atau pesanan dan tidak

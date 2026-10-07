@@ -168,7 +168,7 @@ app.post(['/api/broadcast/:businessId', '/api/broadcast'], limitBroadcast, async
 
   const session = getSession(businessId)
   if (!session || session.status !== 'connected') {
-    return res.status(503).json({ error: 'Bot tidak terhubung ke WhatsApp. Hubungkan dulu di Pengaturan.' })
+    return res.status(503).json({ error: 'Bot tidak terhubung ke WhatsApp. Hubungkan dulu di halaman Bot WhatsApp.' })
   }
 
   // Cek state broadcast untuk bisnis INI saja
@@ -261,7 +261,7 @@ app.post('/api/payment/:businessId', limitPayment, async (req, res) => {
   }
 })
 
-// ─── Uji coba chat (pratinjau di halaman Asisten AI) ─────────────────────────
+// ─── Uji coba chat (pratinjau di halaman Bot WhatsApp) ───────────────────────
 // Dashboard → agent-proxy (cek login & kepemilikan) → /api/playground/:businessId
 // Body: { messages, settings, instructions, closedTest }. Lihat src/ai/playground.js.
 app.post('/api/playground/:businessId', async (req, res) => {

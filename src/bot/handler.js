@@ -35,7 +35,7 @@ export async function handleMessage(sock, msg, businessId, lidMap) {
     }
   }
 
-  // ─── Pengaturan bot (halaman Asisten AI) ──────────────────────────────────
+  // ─── Pengaturan bot (halaman Bot WhatsApp) ────────────────────────────────
   const settings = await getBotSettings(businessId)
   if (!settings.enabled) return
   const ageMs = messageAgeMs(msg)

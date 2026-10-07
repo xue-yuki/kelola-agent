@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────
-// Pengaturan bot per bisnis (halaman Asisten AI di dashboard → tabel bot_settings)
+// Pengaturan bot per bisnis (halaman Bot WhatsApp di dashboard → tabel bot_settings)
 //
 // - Saklar nyala/mati, jam operasional + perilaku di luar jam
 // - Persona: nama asisten, sapaan, gaya balasan (dipakai src/ai/agent.js)
