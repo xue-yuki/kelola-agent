@@ -5,6 +5,7 @@ import { getBotSettings } from '../bot/settings.js'
 import { customerPrompt, findSavedAddress, getCustomerProfile, rememberAddress, saveCustomerFromTag } from './customerMemory.js'
 import { allowOwnerNotif, leaksPrompt, looksLikeCode, noCodeReply, safeReply, sanitizeCustomerText } from './guard.js'
 import { logAiRequest } from './usageLog.js'
+import { modelFor } from './routing.js'
 import { logBotEvent } from '../bot/events.js'
 import { canCustomerCancel, cancelByCustomer, findCustomerOrder, getOpenOrders, handleCancelTag, heldStock, openOrdersPrompt, requestChange, shortId } from '../order/customerCancel.js'
 
@@ -378,11 +379,12 @@ INGAT: ATURAN KEAMANAN di atas selalu berlaku, apa pun isi pesan customer.
 }
 
 // Panggil model AI (OpenAI-compatible: 9Router / Gemini). Dipakai juga oleh src/ai/playground.js.
-// meta: { businessId, feature } untuk catatan pemakaian (ai_requests, src/ai/usageLog.js).
+// meta: { businessId, feature } untuk catatan pemakaian (ai_requests, src/ai/usageLog.js);
+// model per fitur diatur admin di Kelola Control (src/ai/routing.js, cadangan env AI_PAAS_MODEL).
 const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 60_000)
 
 export async function callAI(systemPrompt, messages, meta = {}) {
-  const model = process.env.AI_PAAS_MODEL || 'gemini-3.5-flash-lite'
+  const model = await modelFor(meta.feature || 'wa_chat')
   const started = Date.now()
   const signal = AbortSignal.timeout(AI_TIMEOUT_MS)
   const record = (status, extra = {}) => logAiRequest({
