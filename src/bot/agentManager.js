@@ -27,6 +27,8 @@ export function getAllSessions() {
       businessId,
       status: session.status,
       hasQR: !!session.qr,
+      connectedAt: session.connectedAt ? new Date(session.connectedAt).toISOString() : null,
+      lastMessageAt: session.lastMessageAt ? new Date(session.lastMessageAt).toISOString() : null,
     })
   }
   return result

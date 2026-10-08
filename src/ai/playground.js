@@ -102,7 +102,7 @@ export async function playgroundReply({ businessId, messages, settings: override
     console.error(`⚠️ [${businessId}] Uji coba: gagal cek kuota, lanjut:`, err?.message)
   }
 
-  const ai = await callAI(buildSystemPrompt(biz, products || [], settings, { closedUntilText }), history)
+  const ai = await callAI(buildSystemPrompt(biz, products || [], settings, { closedUntilText }), history, { businessId, feature: 'playground' })
   if (!ai.ok) return { status: 502, body: { error: 'AI sedang tidak bisa dihubungi. Coba lagi sebentar.' } }
 
   const notes = []

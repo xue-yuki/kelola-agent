@@ -2,6 +2,7 @@ import { startServer } from './api/server.js'
 import { autoRestoreAll } from './bot/agentManager.js'
 import { startProofCleanup } from './payment/proof.js'
 import dotenv from 'dotenv'
+import { logBotEvent } from './bot/events.js'
 
 dotenv.config()
 
@@ -15,6 +16,7 @@ process.on('unhandledRejection', (reason) => {
 })
 
 console.log('🚀 Kelola.ai Agent starting...')
+logBotEvent(null, 'bot_started', process.env.RAILWAY_GIT_COMMIT_SHA ? `versi ${process.env.RAILWAY_GIT_COMMIT_SHA.slice(0, 7)}` : null)
 
 // ─── KeepAlive: cegah Node.js exit saat Baileys sedang reconnect ──────────────
 const _keepAlive = setInterval(() => {}, 10000)

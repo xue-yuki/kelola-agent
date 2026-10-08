@@ -12,6 +12,7 @@ import {
 import { decidePayment } from '../payment/proof.js'
 import { notifyOrderCancelled } from '../order/cancelNotice.js'
 import { playgroundReply } from '../ai/playground.js'
+import { logBotEvent } from '../bot/events.js'
 
 dotenv.config()
 
@@ -68,7 +69,13 @@ function requireSecret(req, res, next) {
 
 // ─── Health Check (publik, untuk monitoring) ──────────────────────────────────
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, uptime: process.uptime(), sessions: getAllSessions().length })
+  res.json({
+    ok: true,
+    uptime: process.uptime(),
+    sessions: getAllSessions().length,
+    version: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) || null,
+    memoryMb: Math.round(process.memoryUsage().rss / 1048576),
+  })
 })
 
 // ─── Terapkan middleware secret + global rate limit ke semua route ──────────
@@ -132,6 +139,7 @@ app.post('/api/disconnect/:businessId', limitDisconnect, async (req, res) => {
 
   try {
     await destroySession(businessId, clearAuth)
+    logBotEvent(businessId, 'logged_out', 'diputus dari dashboard')
     res.json({ success: true, message: `Session ${businessId} dihapus.` })
   } catch (err) {
     res.status(500).json({ error: 'Gagal disconnect', message: err.message })

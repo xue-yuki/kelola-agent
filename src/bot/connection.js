@@ -10,6 +10,7 @@ import { Boom } from '@hapi/boom'
 import pino from 'pino'
 import { handleMessage } from './handler.js'
 import { rememberSent, isBotSent, markOwnerReply, messageAgeMs } from './settings.js'
+import { logBotEvent } from './events.js'
 
 const logger = pino({ level: 'silent' })
 
@@ -99,7 +100,11 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
       sessionData.qr = null
       sessionData.qrSince = null
       sessionData.retryCount = 0
+      sessionData.connectedAt = Date.now()
       console.log(`✅ [${businessId}] Terhubung ke WhatsApp!`)
+      // Catat hanya saat status berubah (reconnect cepat tidak membanjiri riwayat)
+      if (sessionData._lastEvent !== 'connected') logBotEvent(businessId, 'connected', isRetry ? 'tersambung lagi' : null)
+      sessionData._lastEvent = 'connected'
 
     } else if (connection === 'close') {
       sessionData.status = 'disconnected'
@@ -109,6 +114,11 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut
 
       console.log(`🔴 [${businessId}] Koneksi terputus (status: ${statusCode})`)
+      if (sessionData._lastEvent === 'connected') {
+        sessionData.connectedAt = null
+        logBotEvent(businessId, shouldReconnect ? 'disconnected' : 'logged_out', `kode ${statusCode ?? '-'}`)
+        sessionData._lastEvent = shouldReconnect ? 'disconnected' : 'logged_out'
+      }
 
       // Belum pernah dipasangkan dan QR sudah menunggu terlalu lama → berhenti mencoba
       const qrExpired = !state.creds.me?.id
@@ -116,6 +126,8 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
         && Date.now() - sessionData.qrSince > QR_TIMEOUT_MS
       if (qrExpired) {
         console.log(`⏹️ [${businessId}] QR tidak dipindai selama ${Math.round(QR_TIMEOUT_MS / 60000)} menit, berhenti mencoba. Klik "Hubungkan" di dashboard untuk mulai lagi.`)
+        logBotEvent(businessId, 'qr_timeout', `${Math.round(QR_TIMEOUT_MS / 60000)} menit`)
+        sessionData._lastEvent = 'qr_timeout'
         sessionData.sock = null
         sessionData.qrSince = null
         return
@@ -136,6 +148,8 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
         }
       } else {
         console.log(`🚫 [${businessId}] Sesi logout. Bersihkan auth...`)
+        if (sessionData._lastEvent !== 'logged_out') logBotEvent(businessId, 'logged_out', `kode ${statusCode ?? '-'}`)
+        sessionData._lastEvent = 'logged_out'
         // Bersihkan session tanpa hapus folder (biar bisa scan QR lagi)
         sessionData.sock = null
         sessionData.status = 'disconnected'
@@ -183,6 +197,7 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
     // handler akan menggabungkan pesan beruntun dari chat yang sama.
     for (const msg of messages) {
       if (!msg?.message) continue
+      sessionData.lastMessageAt = Date.now()
       if (msg.key.fromMe) {
         // Dikirim dari nomor toko tapi bukan oleh bot = pemilik membalas sendiri (HP / WA Web)
         noteOwnerReply(msg)
@@ -192,6 +207,7 @@ export async function createBotSession(businessId, authDir, sessionData, isRetry
         await handleMessage(activeSock, msg, businessId, lidMap)
       } catch (err) {
         console.error(`❌ [${businessId}] Unhandled error in handleMessage:`, err?.message || err)
+        logBotEvent(businessId, 'error', `proses pesan: ${err?.message || err}`)
       }
     }
   })
